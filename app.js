@@ -213,49 +213,69 @@ async function fetchStockPrice(ticker, currency) {
         targetUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${ticker}?interval=1d&range=1d`;
     }
     
-    // Try Proxy A: allorigins.win
-    try {
-        const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(targetUrl)}`;
-        const res = await fetch(proxyUrl, { signal: AbortSignal.timeout(8000) });
-        if (res.ok) {
-            const wrapper = await res.json();
-            const data = JSON.parse(wrapper.contents);
-            if (currency === 'KRW') {
-                const items = data.result?.areas?.[0]?.datas;
-                if (items && items.length > 0) {
-                    return { price: parseFloat(items[0].nv), currency: 'KRW' };
-                }
-            } else {
-                const result = data.chart?.result;
-                if (result && result.length > 0 && result[0] !== null) {
-                    return { price: parseFloat(result[0].meta.regularMarketPrice), currency: 'USD' };
-                }
+    // Helper function to extract price from raw JSON data
+    const parsePriceData = (data) => {
+        if (!data) return null;
+        if (currency === 'KRW') {
+            const items = data.result?.areas?.[0]?.datas;
+            if (items && items.length > 0) {
+                return parseFloat(items[0].nv);
+            }
+        } else {
+            const result = data.chart?.result;
+            if (result && result.length > 0 && result[0] !== null) {
+                return parseFloat(result[0].meta.regularMarketPrice);
             }
         }
-    } catch (e) {
-        console.warn(`Proxy A failed for ${ticker}, trying Proxy B...`);
-    }
-    
-    // Try Proxy B: corsproxy.io
+        return null;
+    };
+
+    // Proxy A: CodeTabs Proxy (Raw response, edge native, very fast)
     try {
-        const proxyUrl = `https://corsproxy.io/?${encodeURIComponent(targetUrl)}`;
-        const res = await fetch(proxyUrl, { signal: AbortSignal.timeout(8000) });
+        const proxyUrl = `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(targetUrl)}`;
+        const res = await fetch(proxyUrl, { signal: AbortSignal.timeout(5000) });
         if (res.ok) {
             const data = await res.json();
-            if (currency === 'KRW') {
-                const items = data.result?.areas?.[0]?.datas;
-                if (items && items.length > 0) {
-                    return { price: parseFloat(items[0].nv), currency: 'KRW' };
-                }
-            } else {
-                const result = data.chart?.result;
-                if (result && result.length > 0 && result[0] !== null) {
-                    return { price: parseFloat(result[0].meta.regularMarketPrice), currency: 'USD' };
+            const price = parsePriceData(data);
+            if (price !== null && price > 0) {
+                return { price, currency: currency === 'KRW' ? 'KRW' : 'USD' };
+            }
+        }
+    } catch (e) {
+        console.warn(`Proxy A (CodeTabs) failed for ${ticker}, trying Proxy B...`, e.message);
+    }
+    
+    // Proxy B: AllOrigins Proxy (JSON wrapped response, reliable backup)
+    try {
+        const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(targetUrl)}`;
+        const res = await fetch(proxyUrl, { signal: AbortSignal.timeout(6000) });
+        if (res.ok) {
+            const wrapper = await res.json();
+            if (wrapper && wrapper.contents) {
+                const data = typeof wrapper.contents === 'string' ? JSON.parse(wrapper.contents) : wrapper.contents;
+                const price = parsePriceData(data);
+                if (price !== null && price > 0) {
+                    return { price, currency: currency === 'KRW' ? 'KRW' : 'USD' };
                 }
             }
         }
     } catch (e) {
-        console.error(`Proxy B failed for ${ticker}:`, e.message);
+        console.warn(`Proxy B (AllOrigins) failed for ${ticker}, trying Proxy C...`, e.message);
+    }
+
+    // Proxy C: ThingProxy (Raw response, secondary backup)
+    try {
+        const proxyUrl = `https://thingproxy.freeboard.io/fetch/${targetUrl}`;
+        const res = await fetch(proxyUrl, { signal: AbortSignal.timeout(6000) });
+        if (res.ok) {
+            const data = await res.json();
+            const price = parsePriceData(data);
+            if (price !== null && price > 0) {
+                return { price, currency: currency === 'KRW' ? 'KRW' : 'USD' };
+            }
+        }
+    } catch (e) {
+        console.error(`Proxy C (ThingProxy) failed for ${ticker}:`, e.message);
     }
     
     return null;
