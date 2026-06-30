@@ -204,7 +204,11 @@ async function fetchStockPrice(ticker, currency) {
     // 2. Direct browser-only fetch using public CORS proxies
     let targetUrl = '';
     if (currency === 'KRW') {
-        targetUrl = `https://polling.finance.naver.com/api/realtime?query=SERVICE_ITEM:${ticker}`;
+        let cleanTicker = ticker;
+        if (ticker.includes('.')) {
+            cleanTicker = ticker.split('.')[0];
+        }
+        targetUrl = `https://polling.finance.naver.com/api/realtime?query=SERVICE_ITEM:${cleanTicker}`;
     } else {
         targetUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${ticker}?interval=1d&range=1d`;
     }
@@ -283,8 +287,8 @@ async function fetchAllStockPrices() {
     let successCount = 0;
     let failCount = 0;
     
-    // Fetch all in parallel
-    const promises = Array.from(tickerMap.entries()).map(async ([ticker, currency]) => {
+    // Fetch sequentially to avoid rate-limiting from public proxies
+    for (const [ticker, currency] of tickerMap.entries()) {
         const result = await fetchStockPrice(ticker, currency);
         if (result) {
             state.stockPrices[ticker] = {
@@ -296,9 +300,9 @@ async function fetchAllStockPrices() {
         } else {
             failCount++;
         }
-    });
-    
-    await Promise.all(promises);
+        // 150ms throttle delay between requests
+        await new Promise(resolve => setTimeout(resolve, 150));
+    }
     
     // Update timestamp
     state.lastPriceUpdate = new Date().toISOString();
