@@ -35,8 +35,8 @@ self.addEventListener('activate', (e) => {
 
 // Intercept fetch requests and serve from cache if available, falling back to network
 self.addEventListener('fetch', (e) => {
-  // Bypassing chrome-extension and local API fetches
-  if (e.request.url.startsWith('chrome-extension') || e.request.url.includes('/api/price') || e.request.url.includes('googleapis.com')) {
+  // Only intercept GET requests belonging to our own origin (ignore external API/proxy calls)
+  if (e.request.method !== 'GET' || !e.request.url.startsWith(self.location.origin)) {
     return;
   }
   

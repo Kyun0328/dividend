@@ -201,17 +201,61 @@ async function fetchStockPrice(ticker, currency) {
         }
     }
     
-    // 2. Direct browser-only fetch using public CORS proxies
-    let targetUrl = '';
+    // 2. Direct browser-only fetch
     if (currency === 'KRW') {
-        let cleanTicker = ticker;
-        if (ticker.includes('.')) {
-            cleanTicker = ticker.split('.')[0];
+        // Use native JSONP for Korean stocks (Naver Finance) - Bypasses CORS proxies entirely!
+        try {
+            const price = await new Promise((resolve, reject) => {
+                let cleanTicker = ticker;
+                if (ticker.includes('.')) {
+                    cleanTicker = ticker.split('.')[0];
+                }
+                const callbackName = 'naver_jsonp_' + cleanTicker + '_' + Math.random().toString(36).substring(2, 9);
+                
+                window[callbackName] = function(data) {
+                    cleanup();
+                    const items = data.result?.areas?.[0]?.datas;
+                    if (items && items.length > 0) {
+                        resolve(parseFloat(items[0].nv));
+                    } else {
+                        reject(new Error('No data'));
+                    }
+                };
+                
+                const script = document.createElement('script');
+                script.id = 'script_' + callbackName;
+                script.src = `https://polling.finance.naver.com/api/realtime?query=SERVICE_ITEM:${cleanTicker}&callback=${callbackName}`;
+                
+                const timeoutId = setTimeout(() => {
+                    cleanup();
+                    reject(new Error('Timeout'));
+                }, 8000);
+                
+                function cleanup() {
+                    clearTimeout(timeoutId);
+                    const el = document.getElementById('script_' + callbackName);
+                    if (el) el.remove();
+                    delete window[callbackName];
+                }
+                
+                script.onerror = () => {
+                    cleanup();
+                    reject(new Error('Script load error'));
+                };
+                
+                document.body.appendChild(script);
+            });
+            if (price > 0) {
+                return { price, currency: 'KRW' };
+            }
+        } catch (e) {
+            console.error(`JSONP fetch failed for Korean stock ${ticker}:`, e.message);
         }
-        targetUrl = `https://polling.finance.naver.com/api/realtime?query=SERVICE_ITEM:${cleanTicker}`;
-    } else {
-        targetUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${ticker}?interval=1d&range=1d`;
+        return null;
     }
+    
+    // US Stocks (Yahoo Finance) require CORS Proxy
+    const targetUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${ticker}?interval=1d&range=1d`;
     
     // Helper function to extract price from raw JSON data
     const parsePriceData = (data) => {
