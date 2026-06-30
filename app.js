@@ -248,7 +248,7 @@ async function fetchStockPrice(ticker, currency) {
     // Proxy B: AllOrigins Proxy (JSON wrapped response, reliable backup)
     try {
         const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(targetUrl)}`;
-        const res = await fetch(proxyUrl, { signal: AbortSignal.timeout(6000) });
+        const res = await fetch(proxyUrl, { signal: AbortSignal.timeout(10000) }); // Increased timeout to 10s
         if (res.ok) {
             const wrapper = await res.json();
             if (wrapper && wrapper.contents) {
@@ -263,10 +263,10 @@ async function fetchStockPrice(ticker, currency) {
         console.warn(`Proxy B (AllOrigins) failed for ${ticker}, trying Proxy C...`, e.message);
     }
 
-    // Proxy C: ThingProxy (Raw response, secondary backup)
+    // Proxy C: CORS.LOL Proxy (Raw response, high availability backup)
     try {
-        const proxyUrl = `https://thingproxy.freeboard.io/fetch/${targetUrl}`;
-        const res = await fetch(proxyUrl, { signal: AbortSignal.timeout(6000) });
+        const proxyUrl = `https://cors.lol/?url=${encodeURIComponent(targetUrl)}`;
+        const res = await fetch(proxyUrl, { signal: AbortSignal.timeout(8000) });
         if (res.ok) {
             const data = await res.json();
             const price = parsePriceData(data);
@@ -275,7 +275,7 @@ async function fetchStockPrice(ticker, currency) {
             }
         }
     } catch (e) {
-        console.error(`Proxy C (ThingProxy) failed for ${ticker}:`, e.message);
+        console.error(`Proxy C (CORS.LOL) failed for ${ticker}:`, e.message);
     }
     
     return null;
@@ -320,8 +320,8 @@ async function fetchAllStockPrices() {
         } else {
             failCount++;
         }
-        // 150ms throttle delay between requests
-        await new Promise(resolve => setTimeout(resolve, 150));
+        // 600ms throttle delay between requests to avoid rate-limiting from public proxies
+        await new Promise(resolve => setTimeout(resolve, 600));
     }
     
     // Update timestamp
