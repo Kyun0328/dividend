@@ -201,125 +201,57 @@ async function fetchStockPrice(ticker, currency) {
         }
     }
     
-    // 2. Direct browser-only fetch
-    if (currency === 'KRW') {
-        // Use native JSONP for Korean stocks (Naver Finance) - Bypasses CORS proxies entirely!
-        try {
-            const price = await new Promise((resolve, reject) => {
-                let cleanTicker = ticker;
-                if (ticker.includes('.')) {
-                    cleanTicker = ticker.split('.')[0];
-                }
-                const callbackName = 'naver_jsonp_' + cleanTicker + '_' + Math.random().toString(36).substring(2, 9);
-                
-                window[callbackName] = function(data) {
-                    cleanup();
-                    const items = data.result?.areas?.[0]?.datas;
-                    if (items && items.length > 0) {
-                        resolve(parseFloat(items[0].nv));
-                    } else {
-                        reject(new Error('No data'));
-                    }
-                };
-                
-                const script = document.createElement('script');
-                script.id = 'script_' + callbackName;
-                script.src = `https://polling.finance.naver.com/api/realtime?query=SERVICE_ITEM:${cleanTicker}&callback=${callbackName}`;
-                
-                const timeoutId = setTimeout(() => {
-                    cleanup();
-                    reject(new Error('Timeout'));
-                }, 8000);
-                
-                function cleanup() {
-                    clearTimeout(timeoutId);
-                    const el = document.getElementById('script_' + callbackName);
-                    if (el) el.remove();
-                    delete window[callbackName];
-                }
-                
-                script.onerror = () => {
-                    cleanup();
-                    reject(new Error('Script load error'));
-                };
-                
-                document.body.appendChild(script);
-            });
-            if (price > 0) {
-                return { price, currency: 'KRW' };
-            }
-        } catch (e) {
-            console.error(`JSONP fetch failed for Korean stock ${ticker}:`, e.message);
-        }
-        return null;
+    // 2. Direct browser-only fetch using public CORS proxies
+    // For Korean stocks (6-digit numeric ticker), convert to Yahoo Finance symbols (.KS or .KQ)
+    let candidateTickers = [ticker];
+    if (currency === 'KRW' && !ticker.includes('.')) {
+        candidateTickers = [`${ticker}.KS`, `${ticker}.KQ`];
     }
     
-    // US Stocks (Yahoo Finance) require CORS Proxy
-    const targetUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${ticker}?interval=1d&range=1d`;
-    
-    // Helper function to extract price from raw JSON data
-    const parsePriceData = (data) => {
-        if (!data) return null;
-        if (currency === 'KRW') {
-            const items = data.result?.areas?.[0]?.datas;
-            if (items && items.length > 0) {
-                return parseFloat(items[0].nv);
-            }
-        } else {
-            const result = data.chart?.result;
-            if (result && result.length > 0 && result[0] !== null) {
-                return parseFloat(result[0].meta.regularMarketPrice);
-            }
+    const parseYahooPrice = (data) => {
+        const result = data?.chart?.result;
+        if (result && result.length > 0 && result[0] !== null) {
+            return parseFloat(result[0].meta.regularMarketPrice);
         }
         return null;
     };
 
-    // Proxy A: CodeTabs Proxy (Raw response, edge native, very fast)
-    try {
-        const proxyUrl = `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(targetUrl)}`;
-        const res = await fetch(proxyUrl, { signal: AbortSignal.timeout(5000) });
-        if (res.ok) {
-            const data = await res.json();
-            const price = parsePriceData(data);
-            if (price !== null && price > 0) {
-                return { price, currency: currency === 'KRW' ? 'KRW' : 'USD' };
+    // Try candidates (.KS first, then .KQ if .KS fails)
+    for (const t of candidateTickers) {
+        const targetUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${t}?interval=1d&range=1d`;
+        
+        // Proxy A: AllOrigins (Supports Yahoo Finance very well without CORS block)
+        try {
+            const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(targetUrl)}`;
+            const res = await fetch(proxyUrl, { signal: AbortSignal.timeout(8000) });
+            if (res.ok) {
+                const wrapper = await res.json();
+                if (wrapper && wrapper.contents) {
+                    const data = typeof wrapper.contents === 'string' ? JSON.parse(wrapper.contents) : wrapper.contents;
+                    const price = parseYahooPrice(data);
+                    if (price !== null && price > 0) {
+                        return { price, currency: currency === 'KRW' ? 'KRW' : 'USD' };
+                    }
+                }
             }
+        } catch (e) {
+            console.warn(`Proxy A (AllOrigins) failed for ${t}:`, e.message);
         }
-    } catch (e) {
-        console.warn(`Proxy A (CodeTabs) failed for ${ticker}, trying Proxy B...`, e.message);
-    }
-    
-    // Proxy B: AllOrigins Proxy (JSON wrapped response, reliable backup)
-    try {
-        const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(targetUrl)}`;
-        const res = await fetch(proxyUrl, { signal: AbortSignal.timeout(10000) }); // Increased timeout to 10s
-        if (res.ok) {
-            const wrapper = await res.json();
-            if (wrapper && wrapper.contents) {
-                const data = typeof wrapper.contents === 'string' ? JSON.parse(wrapper.contents) : wrapper.contents;
-                const price = parsePriceData(data);
+        
+        // Proxy B: CORS.LOL (High availability backup for Yahoo Finance)
+        try {
+            const proxyUrl = `https://cors.lol/?url=${encodeURIComponent(targetUrl)}`;
+            const res = await fetch(proxyUrl, { signal: AbortSignal.timeout(8000) });
+            if (res.ok) {
+                const data = await res.json();
+                const price = parseYahooPrice(data);
                 if (price !== null && price > 0) {
                     return { price, currency: currency === 'KRW' ? 'KRW' : 'USD' };
                 }
             }
+        } catch (e) {
+            console.warn(`Proxy B (CORS.LOL) failed for ${t}:`, e.message);
         }
-    } catch (e) {
-        console.warn(`Proxy B (AllOrigins) failed for ${ticker}, trying Proxy C...`, e.message);
-    }
-
-    // Proxy C: CORS.LOL Proxy (Raw response, high availability backup)
-    try {
-        const proxyUrl = `https://cors.lol/?url=${encodeURIComponent(targetUrl)}`;
-        const res = await fetch(proxyUrl, { signal: AbortSignal.timeout(8000) });
-        if (res.ok) {
-            const data = await res.json();
-            const price = parsePriceData(data);
-            if (price !== null && price > 0) {
-                return { price, currency: currency === 'KRW' ? 'KRW' : 'USD' };
-            }
-        }
-    } catch (e) {
-        console.error(`Proxy C (CORS.LOL) failed for ${ticker}:`, e.message);
     }
     
     return null;
