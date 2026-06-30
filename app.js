@@ -4315,7 +4315,9 @@ async function pushStateToGDrive() {
         });
 
         if (!res.ok) {
-            throw new Error('클라우드 업로드 실패');
+            const errorText = await res.text();
+            console.error("GDrive upload failed details:", res.status, errorText);
+            throw new Error(`클라우드 업로드 실패 (${res.status}): ${errorText}`);
         }
 
         const file = await res.json();
@@ -4363,7 +4365,9 @@ async function pullStateFromGDrive() {
         });
 
         if (!fileRes.ok) {
-            throw new Error('파일 다운로드 에러');
+            const errorText = await fileRes.text();
+            console.error("GDrive download failed details:", fileRes.status, errorText);
+            throw new Error(`파일 다운로드 에러 (${fileRes.status}): ${errorText}`);
         }
 
         const cloudState = await fileRes.json();
