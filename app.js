@@ -306,9 +306,16 @@ async function fetchAllStockPrices() {
     
     let successCount = 0;
     let failCount = 0;
+    const totalTickers = tickerMap.size;
+    let currentIdx = 0;
     
     // Fetch sequentially to avoid rate-limiting from public proxies
     for (const [ticker, currency] of tickerMap.entries()) {
+        currentIdx++;
+        if (updateBtn) {
+            updateBtn.innerHTML = `<i class="loader-spinner" style="display:inline-block; width:12px; height:12px; border:2px solid var(--text-primary); border-top-color:transparent; border-radius:50%; animation:spin 1s linear infinite; margin-right:4px; vertical-align:middle;"></i> 조회 중 (${currentIdx}/${totalTickers})...`;
+        }
+
         const result = await fetchStockPrice(ticker, currency);
         if (result) {
             state.stockPrices[ticker] = {
@@ -320,8 +327,8 @@ async function fetchAllStockPrices() {
         } else {
             failCount++;
         }
-        // 600ms throttle delay between requests to avoid rate-limiting from public proxies
-        await new Promise(resolve => setTimeout(resolve, 600));
+        // 1500ms throttle delay between requests to avoid rate-limiting from public proxies
+        await new Promise(resolve => setTimeout(resolve, 1500));
     }
     
     // Update timestamp
