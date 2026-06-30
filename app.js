@@ -4261,8 +4261,7 @@ async function pushStateToGDrive() {
         
         const metadata = {
             'name': 'portfolio_state.json',
-            'mimeType': 'application/json',
-            'parents': ['appDataFolder']
+            'mimeType': 'application/json'
         };
         
         const data = JSON.stringify(state, null, 2);
@@ -4294,6 +4293,8 @@ async function pushStateToGDrive() {
         if (gDriveFileId) {
             url = `https://www.googleapis.com/upload/drive/v3/files/${gDriveFileId}?uploadType=multipart`;
             method = 'PATCH';
+        } else {
+            metadata.parents = ['appDataFolder'];
         }
 
         const multipartRequestBody =
