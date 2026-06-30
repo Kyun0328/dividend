@@ -1,0 +1,1148 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>배당 다이어리 - Dividend Tracker Dashboard</title>
+    <!-- Stylesheets -->
+    <link rel="stylesheet" href="styles.css">
+    <!-- PWA Manifest & Mobile Icons -->
+    <link rel="manifest" href="manifest.json">
+    <meta name="theme-color" content="#0b0f19">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <link rel="apple-touch-icon" href="icon-192.png">
+    
+    <!-- Chart.js CDN -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <!-- SheetJS CDN -->
+    <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+    <!-- Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <!-- Google Identity Services & GAPI for Cloud Sync -->
+    <script src="https://accounts.google.com/gsi/client" async defer></script>
+    <script src="https://apis.google.com/js/api.js" async defer></script>
+</head>
+<body data-theme="dark">
+
+    <div class="app-container">
+        <!-- Mobile Header Bar -->
+        <div class="mobile-header">
+            <button id="btnMobileMenu" class="btn-mobile-menu" title="메뉴 열기">
+                <i data-lucide="menu" style="width: 20px; height: 20px;"></i>
+            </button>
+            <span class="mobile-logo">배당 다이어리</span>
+        </div>
+        
+        <!-- Sidebar Backdrop for Mobile -->
+        <div class="sidebar-backdrop" id="sidebarBackdrop"></div>
+        
+        <!-- Sidebar Navigation -->
+        <aside>
+            <div class="sidebar-top">
+                <div class="logo-section">
+                    <div class="logo-icon">
+                        <i data-lucide="line-chart"></i>
+                    </div>
+                    <span class="logo-text">배당 다이어리</span>
+                </div>
+                
+                <ul class="nav-links">
+                    <li class="nav-item active" data-tab="tab-dashboard">
+                        <a href="#"><i data-lucide="layout-dashboard"></i> 대시보드</a>
+                    </li>
+                    <li class="nav-item" data-tab="tab-accounts">
+                        <a href="#"><i data-lucide="wallet"></i> 계좌 관리</a>
+                    </li>
+                    <li class="nav-item" data-tab="tab-portfolio">
+                        <a href="#"><i data-lucide="folder-kanban"></i> 포트폴리오</a>
+                    </li>
+                    <li class="nav-item" data-tab="tab-dividends">
+                        <a href="#"><i data-lucide="coins"></i> 배당 수령 내역</a>
+                    </li>
+                    <li class="nav-item" data-tab="tab-reinvestment">
+                        <a href="#"><i data-lucide="repeat"></i> 재투자 분석</a>
+                    </li>
+                </ul>
+            </div>
+            
+            <div class="sidebar-footer">
+                <button class="theme-toggle-btn" id="themeToggleBtn">
+                    <i data-lucide="sun"></i> 라이트 모드
+                </button>
+                <button class="btn btn-secondary" id="btnExportJSON">
+                    <i data-lucide="download"></i> 데이터 백업
+                </button>
+                <button class="btn btn-secondary" id="btnImportJSON">
+                    <i data-lucide="upload"></i> 백업 복원
+                </button>
+                <button class="btn btn-danger" id="btnResetData">
+                    <i data-lucide="refresh-cw"></i> 초기화
+                </button>
+                
+                <div class="cloud-sync-sidebar" style="margin-top: 0.75rem; padding-top: 0.75rem; border-top: 1px solid var(--border-color); display: flex; flex-direction: column; gap: 0.5rem; width: 100%;">
+                    <div style="display: flex; align-items: center; justify-content: space-between; font-size: 0.72rem; color: var(--text-secondary); font-weight: 500; padding: 0 0.25rem;">
+                        <span style="display: flex; align-items: center; gap: 0.25rem;"><i data-lucide="cloud" style="width:12px;height:12px;"></i> 구글 동기화</span>
+                        <span id="gDriveStatusDot" class="status-dot offline" title="구글 미연동"></span>
+                    </div>
+                    <button class="btn btn-secondary" id="btnGDriveSetup" style="padding: 0.4rem; font-size: 0.75rem; display: flex; align-items: center; justify-content: center; gap: 0.25rem; width: 100%;">
+                         설정 및 로그인
+                    </button>
+                </div>
+            </div>
+        </aside>
+
+        <!-- Main Content Area -->
+        <main>
+            
+            <!-- Global Header -->
+            <header>
+                <div class="header-title">
+                    <h1 id="pageTitle">포트폴리오 대시보드</h1>
+                    <p id="pageDescription">배당주 자산 현황과 배당 추이를 한 눈에 모니터링합니다.</p>
+                </div>
+                
+                <div class="header-actions">
+                    <div class="currency-selector">
+                        <div class="currency-option active" data-currency="KRW">₩ KRW</div>
+                        <div class="currency-option" data-currency="USD">$ USD</div>
+                    </div>
+                </div>
+            </header>
+
+            <!-- TAB 1: 대시보드 종합 화면 -->
+            <section id="tab-dashboard" class="tab-content active">
+                
+                <!-- Price Update Bar -->
+                <div style="display: flex; justify-content: flex-end; align-items: center; gap: 0.75rem; margin-bottom: 0.75rem; flex-wrap: wrap;">
+                    <span id="lastPriceUpdateTime" style="font-size: 0.75rem; color: var(--text-secondary);"></span>
+                    <button class="btn btn-secondary" id="btnUpdatePrices" style="font-size: 0.8rem; padding: 0.4rem 0.8rem;">
+                        <i data-lucide="refresh-cw" style="width:14px;height:14px;"></i> 현재가 업데이트
+                    </button>
+                </div>
+
+                <div class="kpi-grid">
+                    <div class="kpi-card">
+                        <div class="kpi-info">
+                            <span class="kpi-label">매수 금액</span>
+                            <span class="kpi-value" id="kpiTotalCost">₩0</span>
+                        </div>
+                        <div class="kpi-icon-wrapper">
+                            <i data-lucide="wallet"></i>
+                        </div>
+                    </div>
+                    
+                    <div class="kpi-card">
+                        <div class="kpi-info">
+                            <span class="kpi-label">평가 금액</span>
+                            <span class="kpi-value" id="kpiMarketValue">₩0</span>
+                            <span class="kpi-sub" id="kpiProfitLoss" style="font-size: 0.8rem; margin-top: 0.2rem;"></span>
+                        </div>
+                        <div class="kpi-icon-wrapper">
+                            <i data-lucide="trending-up"></i>
+                        </div>
+                    </div>
+                    
+                    <div class="kpi-card">
+                        <div class="kpi-info">
+                            <span class="kpi-label">연간 예상 배당금</span>
+                            <span class="kpi-value" id="kpiAnnualDividends">₩0</span>
+                        </div>
+                        <div class="kpi-icon-wrapper">
+                            <i data-lucide="calendar-check"></i>
+                        </div>
+                    </div>
+                    
+                    <div class="kpi-card">
+                        <div class="kpi-info">
+                            <span class="kpi-label">평균 배당수익률</span>
+                            <span class="kpi-value" id="kpiAverageYield">0.00%</span>
+                        </div>
+                        <div class="kpi-icon-wrapper">
+                            <i data-lucide="percent"></i>
+                        </div>
+                    </div>
+                    
+                    <div class="kpi-card">
+                        <div class="kpi-info">
+                            <span class="kpi-label">누적 수령 배당금</span>
+                            <span class="kpi-value" id="kpiTotalReceived">₩0</span>
+                        </div>
+                        <div class="kpi-icon-wrapper">
+                            <i data-lucide="piggy-bank"></i>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Charts Section Grid -->
+                <div class="dashboard-grid">
+                    <div class="panel">
+                        <div class="panel-header">
+                            <span class="panel-title"><i data-lucide="bar-chart-3"></i> 월별 배당금 수령 추이</span>
+                            <span class="kpi-trend positive" style="font-size: 0.75rem;">(계좌별 합산)</span>
+                        </div>
+                        <div class="panel-body">
+                            <div class="chart-container">
+                                <canvas id="monthlyDividendChart"></canvas>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="panel">
+                        <div class="panel-header">
+                            <span class="panel-title"><i data-lucide="pie-chart"></i> 보유 종목 비중</span>
+                        </div>
+                        <div class="panel-body">
+                            <div class="chart-container">
+                                <canvas id="portfolioAllocationChart"></canvas>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- New Panel: 배당 성장 및 최근 수령 현황 -->
+                    <div class="panel full-width">
+                        <div class="panel-header">
+                            <span class="panel-title"><i data-lucide="trending-up"></i> 배당 성장 및 최근 수령 현황</span>
+                        </div>
+                        <div class="panel-body">
+                            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 1.5rem;">
+                                <!-- Left Column: 최근 3개월 평균 배당 현황 -->
+                                <div style="background: rgba(99,102,241,0.04); border: 1px dashed var(--border-color); border-radius: 12px; padding: 1.25rem; display: flex; flex-direction: column; justify-content: center; gap: 0.75rem;">
+                                    <div style="font-weight: 600; font-size: 0.95rem; color: var(--text-primary); display: flex; align-items: center; gap: 0.5rem;">
+                                        <i data-lucide="calendar" style="color: var(--primary); width: 18px; height: 18px;"></i>
+                                        최근 3개월 평균 배당 현황
+                                    </div>
+                                    <div style="display: flex; flex-direction: column; gap: 0.5rem; margin-top: 0.5rem;">
+                                        <div style="display: flex; justify-content: space-between; font-size: 0.875rem;">
+                                            <span style="color: var(--text-secondary);">평균 배당금 (월)</span>
+                                            <strong id="dbRecent3MAmount" style="color: var(--text-primary);">-</strong>
+                                        </div>
+                                        <div style="display: flex; justify-content: space-between; font-size: 0.875rem;">
+                                            <span style="color: var(--text-secondary);">연환산 배당률</span>
+                                            <strong id="dbRecent3MYield" style="color: var(--text-primary);">-</strong>
+                                        </div>
+                                    </div>
+                                </div>
+                                
+                                <!-- Right Column: 종목별 배당성장률 분석 -->
+                                <div style="background: rgba(16,185,129,0.04); border: 1px dashed var(--border-color); border-radius: 12px; padding: 1.25rem; display: flex; flex-direction: column; gap: 0.75rem;">
+                                    <div style="font-weight: 600; font-size: 0.95rem; color: var(--text-primary); display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; flex-wrap: wrap;">
+                                        <div style="display: flex; align-items: center; gap: 0.5rem;">
+                                            <i data-lucide="trending-up" style="color: var(--success); width: 18px; height: 18px;"></i>
+                                            종목별 배당 성장률 (동일수량 기준)
+                                        </div>
+                                        <select id="dbDivGrowthStockSelect" class="form-control" style="width: auto; padding: 0.2rem 1.5rem 0.2rem 0.5rem; font-size: 0.8rem; margin: 0; background: var(--card-bg); border: 1px solid var(--border-color); border-radius: 6px;">
+                                            <option value="">종목 선택</option>
+                                        </select>
+                                    </div>
+                                    <div style="display: flex; flex-direction: column; gap: 0.5rem; margin-top: 0.5rem;">
+                                        <div style="display: flex; justify-content: space-between; font-size: 0.875rem;">
+                                            <span style="color: var(--text-secondary);">분석 기간</span>
+                                            <strong id="dbDivGrowthPeriod" style="color: var(--text-primary);">-</strong>
+                                        </div>
+                                        <div style="display: flex; justify-content: space-between; font-size: 0.875rem;">
+                                            <span style="color: var(--text-secondary);">시작 주당 배당금 (DPS)</span>
+                                            <strong id="dbDivGrowthStartDps" style="color: var(--text-primary);">-</strong>
+                                        </div>
+                                        <div style="display: flex; justify-content: space-between; font-size: 0.875rem;">
+                                            <span style="color: var(--text-secondary);">최근 주당 배당금 (DPS)</span>
+                                            <strong id="dbDivGrowthEndDps" style="color: var(--text-primary);">-</strong>
+                                        </div>
+                                        <div style="display: flex; justify-content: space-between; font-size: 0.875rem; border-top: 1px dashed var(--border-color); padding-top: 0.5rem; margin-top: 0.25rem;">
+                                            <span style="color: var(--text-secondary); font-weight: 600;">총 배당 성장률 (연평균 CAGR)</span>
+                                            <strong id="dbDivGrowthRate" class="kpi-trend positive">-</strong>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Simulator Panel: 최근 추세 기반 배당금 미래 예측 -->
+                    <div class="panel full-width">
+                        <div class="panel-header" style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 0.5rem;">
+                            <span class="panel-title" style="margin: 0;"><i data-lucide="trending-up"></i> 최근 추세 기반 배당금 미래 예측</span>
+                            <div style="display: flex; align-items: center; gap: 0.5rem; margin-left: auto;">
+                                <label for="fcBasisSelect" style="font-size: 0.8rem; color: var(--text-secondary); margin: 0; white-space: nowrap;">예측 기준:</label>
+                                <select id="fcBasisSelect" class="form-control" style="padding: 0.25rem 0.5rem; font-size: 0.8rem; background: var(--card-bg); border: 1px solid var(--border-color); border-radius: 6px; width: 180px; height: auto;">
+                                    <option value="actual" selected>실수령액 기준 (기본)</option>
+                                    <option value="power">배당력 증가량 기준</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div class="panel-body">
+                            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 1.5rem;">
+                                <!-- Left Column: 최근 3개월 배당금 증분 정보 -->
+                                <div style="display: flex; flex-direction: column; gap: 1rem; border: 1px solid var(--border-color); border-radius: 12px; padding: 1.25rem; background: rgba(99,102,241,0.02); justify-content: center;">
+                                    <div style="font-weight: 600; font-size: 0.95rem; color: var(--text-primary);">
+                                        최근 3개월 배당 증가추세
+                                    </div>
+                                    <div style="display: flex; flex-direction: column; background: var(--bg-secondary); padding: 0.75rem 1rem; border-radius: 8px; border: 1px solid var(--border-color); text-align: center; gap: 0.25rem;">
+                                        <span id="fcTrendLabel" style="font-size: 0.8rem; color: var(--text-secondary);">최근 3개월간 배당 증가추세 (월평균)</span>
+                                        <strong id="fcTrendIncrement" class="kpi-trend positive" style="font-size: 1.3rem;">-</strong>
+                                    </div>
+                                    <p style="font-size: 0.8rem; color: var(--text-secondary); line-height: 1.4; margin: 0;">
+                                        * 최근 3개월 동안 매수 등을 통해 포트폴리오의 월배당 생성 능리가 매달 평균적으로 얼마나 증가했는지를 나타냅니다.
+                                    </p>
+                                </div>
+
+                                <!-- Middle Column: 연도별 예상 배당금 리포트 -->
+                                <div style="display: flex; flex-direction: column; gap: 1rem; border: 1px solid var(--border-color); border-radius: 12px; padding: 1.25rem; background: var(--card-bg);">
+                                    <div style="font-weight: 600; font-size: 0.95rem; color: var(--text-primary); margin-bottom: 0.25rem;">
+                                        기간별 월 배당금 예측 (평균)
+                                    </div>
+                                    <div style="display: flex; flex-direction: column; gap: 0.75rem;">
+                                        <div style="display: flex; justify-content: space-between; font-size: 0.875rem; border-bottom: 1px dashed var(--border-color); padding-bottom: 0.5rem;">
+                                            <span style="color: var(--text-secondary);">현재 월 배당금</span>
+                                            <strong id="fcProjCurrent" style="color: var(--text-primary);">-</strong>
+                                        </div>
+                                        <div style="display: flex; justify-content: space-between; font-size: 0.875rem; border-bottom: 1px dashed var(--border-color); padding-bottom: 0.5rem;">
+                                            <span style="color: var(--text-secondary);">1년(12개월) 후 월 배당금</span>
+                                            <strong id="fcProj1Yr" style="color: var(--text-primary);">-</strong>
+                                        </div>
+                                        <div style="display: flex; justify-content: space-between; font-size: 0.875rem; border-bottom: 1px dashed var(--border-color); padding-bottom: 0.5rem;">
+                                            <span style="color: var(--text-secondary);">3년 후 월 배당금</span>
+                                            <strong id="fcProj3Yr" style="color: var(--text-primary);">-</strong>
+                                        </div>
+                                        <div style="display: flex; justify-content: space-between; font-size: 0.875rem; border-bottom: 1px dashed var(--border-color); padding-bottom: 0.5rem;">
+                                            <span style="color: var(--text-secondary);">5년 후 월 배당금</span>
+                                            <strong id="fcProj5Yr" style="color: var(--text-primary);">-</strong>
+                                        </div>
+                                        <div style="display: flex; justify-content: space-between; font-size: 0.875rem;">
+                                            <span style="color: var(--text-secondary);">10년 후 월 배당금</span>
+                                            <strong id="fcProj10Yr" style="color: var(--text-primary);">-</strong>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <!-- Right Column: 향후 12개월 월별 예상 테이블 -->
+                                <div style="display: flex; flex-direction: column; border: 1px solid var(--border-color); border-radius: 12px; padding: 1.25rem; background: var(--card-bg); min-height: 220px;">
+                                    <div style="font-weight: 600; font-size: 0.95rem; color: var(--text-primary); margin-bottom: 0.5rem;">
+                                        향후 12개월간 월별 배당금 추이
+                                    </div>
+                                    <div style="flex: 1; overflow-y: auto; max-height: 180px; padding-right: 0.25rem;">
+                                        <table style="width: 100%; border-collapse: collapse; font-size: 0.8rem; text-align: left;">
+                                            <thead>
+                                                <tr style="border-bottom: 1px solid var(--border-color); color: var(--text-secondary);">
+                                                    <th style="padding: 0.4rem 0;">개월</th>
+                                                    <th style="padding: 0.4rem 0; text-align: right;">예상 월 배당금</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody id="fcProj12MonthsTableBody">
+                                                <!-- Populated dynamically -->
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="panel full-width">
+                        <div class="panel-header">
+                            <span class="panel-title"><i data-lucide="trending-up"></i> 누적 배당금 성장 성장곡선</span>
+                        </div>
+                        <div class="panel-body">
+                            <div class="chart-container-large">
+                                <canvas id="cumulativeDividendChart"></canvas>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- TAB 2: 계좌 관리 화면 -->
+            <section id="tab-accounts" class="tab-content">
+                <div class="panel">
+                    <div class="panel-header">
+                        <span class="panel-title"><i data-lucide="wallet"></i> 등록된 계좌</span>
+                        <button class="btn btn-primary" id="btnAddAccount">
+                            <i data-lucide="plus"></i> 계좌 추가
+                        </button>
+                    </div>
+                    <div class="panel-body">
+                        <div class="accounts-grid" id="accountsGrid">
+                            <!-- Injected dynamically by JavaScript -->
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- TAB 3: 포트폴리오 관리 화면 -->
+            <section id="tab-portfolio" class="tab-content">
+                <div class="panel">
+                    <div class="panel-header" style="flex-wrap: wrap; gap: 1rem;">
+                        <span class="panel-title" style="margin-right: auto;"><i data-lucide="folder-kanban"></i> 보유 종목 포트폴리오</span>
+                        
+                        <div style="display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap;">
+                            <select id="filterPortfolioAccount" class="form-control" style="width: auto; padding: 0.4rem 2rem 0.4rem 0.8rem;">
+                                <option value="all">전체 계좌 보기</option>
+                            </select>
+                            <select id="sortPortfolio" class="form-control" style="width: auto; padding: 0.4rem 2rem 0.4rem 0.8rem;">
+                                <option value="account-asc">계좌별 묶어보기 (기본)</option>
+                                <option value="name-asc">종목명 (가나다순)</option>
+                                <option value="amount-desc">매수금액 큰순</option>
+                                <option value="eval-desc">평가금액 큰순</option>
+                                <option value="yield-desc">배당률 높은순</option>
+                                <option value="profit-desc">수익률 높은순</option>
+                            </select>
+                        </div>
+                        
+                        <div style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
+                            <button class="btn btn-secondary" id="btnBuyMore">
+                                <i data-lucide="shopping-cart"></i> 추가 구매
+                            </button>
+                            <button class="btn btn-primary" id="btnAddPortfolio">
+                                <i data-lucide="plus"></i> 신규 종목 등록
+                            </button>
+                        </div>
+                    </div>
+                    <div class="panel-body">
+                        <div class="table-responsive">
+                            <table>
+                                <thead>
+                                    <tr>
+                                        <th>계좌</th>
+                                        <th>종목명</th>
+                                        <th>티커</th>
+                                        <th>보유수량</th>
+                                        <th>평균단가</th>
+                                        <th>매수금액</th>
+                                        <th>현재가</th>
+                                        <th>평가금액</th>
+                                        <th>손익</th>
+                                        <th>주당 연배당금</th>
+                                        <th>연 예상 배당금</th>
+                                        <th>배당률</th>
+                                        <th>관리</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="portfolioTableBody">
+                                    <!-- Injected dynamically by JavaScript -->
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- TAB 4: 배당금 수령 기록 화면 -->
+            <section id="tab-dividends" class="tab-content">
+                <div class="panel">
+                    <div class="panel-header">
+                        <span class="panel-title"><i data-lucide="coins"></i> 실제 배당 수령 내역</span>
+                        <button class="btn btn-primary" id="btnAddDividend">
+                            <i data-lucide="plus"></i> 배당 수령 기록
+                        </button>
+                    </div>
+                    <div class="panel-body">
+                        <!-- 테이블 필터 및 정렬 섹션 -->
+                        <div class="table-filters" style="display: flex; gap: 1rem; align-items: center; margin-bottom: 1.5rem; flex-wrap: wrap;">
+                            <div class="form-group" style="margin-bottom: 0; flex: 1; min-width: 160px;">
+                                <label for="filterAccount" style="font-size: 0.75rem; font-weight: 600; margin-bottom: 0.25rem;">계좌 필터</label>
+                                <select id="filterAccount" style="padding: 0.5rem 0.75rem; font-size: 0.85rem; border-radius: 8px;">
+                                    <option value="">전체 계좌</option>
+                                </select>
+                            </div>
+                            <div class="form-group" style="margin-bottom: 0; flex: 1; min-width: 160px;">
+                                <label for="filterStock" style="font-size: 0.75rem; font-weight: 600; margin-bottom: 0.25rem;">종목 필터</label>
+                                <select id="filterStock" style="padding: 0.5rem 0.75rem; font-size: 0.85rem; border-radius: 8px;">
+                                    <option value="">전체 종목</option>
+                                </select>
+                            </div>
+                            <div class="form-group" style="margin-bottom: 0; flex: 1; min-width: 160px;">
+                                <label for="sortDividend" style="font-size: 0.75rem; font-weight: 600; margin-bottom: 0.25rem;">정렬 기준</label>
+                                <select id="sortDividend" style="padding: 0.5rem 0.75rem; font-size: 0.85rem; border-radius: 8px;">
+                                    <option value="date-desc">날짜 최신순 (기본)</option>
+                                    <option value="date-asc">날짜 오래된순</option>
+                                    <option value="amount-desc">원화 환산금액 큰순</option>
+                                    <option value="amount-asc">원화 환산금액 작은순</option>
+                                    <option value="account-asc">계좌명 오름차순</option>
+                                    <option value="account-desc">계좌명 내림차순</option>
+                                    <option value="stock-asc">종목명 오름차순</option>
+                                    <option value="stock-desc">종목명 내림차순</option>
+                                </select>
+                            </div>
+                        </div>
+
+                        <div class="table-responsive">
+                            <table>
+                                <thead>
+                                    <tr>
+                                        <th>수령일</th>
+                                        <th>계좌</th>
+                                        <th>종목명 (티커)</th>
+                                        <th>배당수령액 (외화)</th>
+                                        <th>원화 환산 금액</th>
+                                        <th>원천징수 세금</th>
+                                        <th>관리</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="dividendLogsTableBody">
+                                    <!-- Injected dynamically by JavaScript -->
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- TAB 6: 배당 재투자 및 성장 분석 화면 -->
+            <section id="tab-reinvestment" class="tab-content">
+                <div class="panel">
+                    <div class="panel-header" style="flex-wrap: wrap; gap: 1rem;">
+                        <span class="panel-title"><i data-lucide="repeat"></i> 종목별 배당 재투자 및 성장 분석</span>
+                        <div class="form-group" style="margin-bottom: 0; min-width: 250px;">
+                            <select id="reinvestStockSelect" style="padding: 0.5rem 0.75rem; font-size: 0.85rem; border-radius: 8px; width: 100%;">
+                                <option value="">-- 종목 선택 --</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="panel-body">
+                        <!-- KPI summary for the selected stock -->
+                        <div class="kpi-grid" id="reinvestKpiGrid" style="margin-bottom: 1.5rem; display: none;">
+                            <div class="kpi-card">
+                                <div class="kpi-info">
+                                    <span class="kpi-label">현재 보유 수량</span>
+                                    <span class="kpi-value" id="reinvestKpiShares">0주</span>
+                                </div>
+                                <div class="kpi-icon-wrapper"><i data-lucide="folder-kanban"></i></div>
+                            </div>
+                            <div class="kpi-card">
+                                <div class="kpi-info">
+                                    <span class="kpi-label">평균 매수 단가</span>
+                                    <span class="kpi-value" id="reinvestKpiAvgPrice">₩0</span>
+                                </div>
+                                <div class="kpi-icon-wrapper"><i data-lucide="banknote"></i></div>
+                            </div>
+                            <div class="kpi-card">
+                                <div class="kpi-info">
+                                    <span class="kpi-label">누적 수령 배당금</span>
+                                    <span class="kpi-value" id="reinvestKpiTotalReceived">₩0</span>
+                                </div>
+                                <div class="kpi-icon-wrapper"><i data-lucide="piggy-bank"></i></div>
+                            </div>
+                            <div class="kpi-card">
+                                <div class="kpi-info">
+                                    <span class="kpi-label">평균 배당성장률</span>
+                                    <span class="kpi-value" id="reinvestKpiGrowthRate">0.0%</span>
+                                </div>
+                                <div class="kpi-icon-wrapper"><i data-lucide="trending-up"></i></div>
+                            </div>
+                        </div>
+
+                        <!-- Main analysis content, hidden initially until stock is selected -->
+                        <div id="reinvestAnalysisContent" style="display: none; flex-direction: column; gap: 2rem;">
+                            <!-- Chart Panel -->
+                            <div class="panel" style="background: rgba(255, 255, 255, 0.02); border: 1px solid rgba(255, 255, 255, 0.05); padding: 1.5rem;">
+                                <div class="panel-header" style="border-bottom: none; padding-bottom: 0;">
+                                    <span class="panel-title" style="font-size: 1rem;"><i data-lucide="line-chart"></i> 월별 보유수량 및 수령배당금 추이</span>
+                                </div>
+                                <div class="panel-body">
+                                    <div class="chart-container-large" style="height: 350px;">
+                                        <canvas id="reinvestChart"></canvas>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- Table Panel -->
+                            <div class="panel" style="background: rgba(255, 255, 255, 0.02); border: 1px solid rgba(255, 255, 255, 0.05); padding: 1.5rem;">
+                                <div class="panel-header" style="border-bottom: none; padding-bottom: 0;">
+                                    <span class="panel-title" style="font-size: 1rem;"><i data-lucide="table"></i> 월별 상세 분석 내역</span>
+                                </div>
+                                <div class="panel-body">
+                                    <div class="table-responsive">
+                                        <table>
+                                            <thead>
+                                                <tr>
+                                                    <th>월 (Month)</th>
+                                                    <th>보유 수량</th>
+                                                    <th>수령 배당금 (세전)</th>
+                                                    <th>주당 배당금 (DPS)</th>
+                                                    <th>배당수익률 (Yield)</th>
+                                                    <th>배당 증가율</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody id="reinvestTableBody">
+                                                <!-- Dynamic rows -->
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Empty state when no stock is selected -->
+                        <div class="empty-state" id="reinvestEmptyState">
+                            <i data-lucide="repeat"></i>
+                            <h3>분석할 종목을 선택해 주세요</h3>
+                            <p>상단의 종목 선택 상자에서 보유 중인 주식을 고르면 수량 대비 배당금 성장 분석이 시작됩니다.</p>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- SCHD & 미국배당다우존스 통합 분석 패널 -->
+                <div class="panel" style="margin-top: 2rem;">
+                    <div class="panel-header">
+                        <span class="panel-title"><i data-lucide="award"></i> SCHD 및 미국배당다우존스 통합 분석</span>
+                    </div>
+                    <div class="panel-body">
+                        <!-- KPI summary for SCHD family -->
+                        <div class="kpi-grid" style="margin-bottom: 1.5rem;">
+                            <div class="kpi-card">
+                                <div class="kpi-info">
+                                    <span class="kpi-label">총 투자 금액 (매수 원금)</span>
+                                    <span class="kpi-value" id="schdKpiTotalInvested">₩0</span>
+                                </div>
+                                <div class="kpi-icon-wrapper"><i data-lucide="dollar-sign"></i></div>
+                            </div>
+                            <div class="kpi-card">
+                                <div class="kpi-info">
+                                    <span class="kpi-label">총 보유 종목 및 수량</span>
+                                    <span class="kpi-value" id="schdKpiSharesList" style="font-size: 0.85rem; line-height: 1.3; font-weight: 600; white-space: pre-line;">-</span>
+                                </div>
+                                <div class="kpi-icon-wrapper"><i data-lucide="layers"></i></div>
+                            </div>
+                            <div class="kpi-card">
+                                <div class="kpi-info">
+                                    <span class="kpi-label">예상 연 배당 수령액</span>
+                                    <span class="kpi-value" id="schdKpiExpectedDiv">₩0</span>
+                                </div>
+                                <div class="kpi-icon-wrapper"><i data-lucide="gift"></i></div>
+                            </div>
+                            <div class="kpi-card">
+                                <div class="kpi-info">
+                                    <span class="kpi-label">평균 세전 배당수익률</span>
+                                    <span class="kpi-value" id="schdKpiAvgYield">0.0%</span>
+                                </div>
+                                <div class="kpi-icon-wrapper"><i data-lucide="percent"></i></div>
+                            </div>
+                        </div>
+
+                        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 1.5rem;">
+                            <!-- Left side: Chart -->
+                            <div class="panel" style="background: rgba(255, 255, 255, 0.02); border: 1px solid rgba(255, 255, 255, 0.05); padding: 1.25rem;">
+                                <div class="panel-header" style="border-bottom: none; padding-bottom: 0;">
+                                    <span class="panel-title" style="font-size: 0.95rem;"><i data-lucide="bar-chart-2"></i> 월별 배당 수령 추이 (SCHD군 통합)</span>
+                                </div>
+                                <div class="panel-body">
+                                    <div class="chart-container-large" style="height: 280px; position: relative;">
+                                        <canvas id="schdChart"></canvas>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- Right side: Monthly breakdown table -->
+                            <div class="panel" style="background: rgba(255, 255, 255, 0.02); border: 1px solid rgba(255, 255, 255, 0.05); padding: 1.25rem;">
+                                <div class="panel-header" style="border-bottom: none; padding-bottom: 0;">
+                                    <span class="panel-title" style="font-size: 0.95rem;"><i data-lucide="list"></i> 월별 수령 상세 현황</span>
+                                </div>
+                                <div class="panel-body" style="max-height: 280px; overflow-y: auto;">
+                                    <table style="width: 100%; border-collapse: collapse; font-size: 0.8rem;">
+                                        <thead>
+                                            <tr style="border-bottom: 1px solid var(--border-color); color: var(--text-secondary); text-align: left;">
+                                                <th style="padding: 0.4rem 0;">배당 지급월</th>
+                                                <th style="padding: 0.4rem 0; text-align: right;">수령 금액</th>
+                                                <th style="padding: 0.4rem 0; text-align: right;">해당월 배당률</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody id="schdTableBody">
+                                            <!-- Dynamic rows -->
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+        </main>
+        
+    </div>
+
+    <!-- TOAST NOTIFICATION CONTAINER -->
+    <div class="toast-container" id="toastContainer"></div>
+
+    <!-- MODAL 1: 계좌 등록 모달 -->
+    <div class="modal-backdrop" id="modalAccount">
+        <div class="modal-content">
+            <div class="modal-header">
+                <span class="modal-title">새 계좌 등록</span>
+                <button class="modal-close"><i data-lucide="x"></i></button>
+            </div>
+            <form id="formAccount">
+                <div class="form-row">
+                    <div class="form-group">
+                        <label for="accountName">계좌명</label>
+                        <input type="text" id="accountName" placeholder="예: 신한투자증권 ISA, 미래에셋 연금" required autocomplete="off">
+                    </div>
+                    <div class="form-group">
+                        <label for="accountNumber">계좌번호 (선택)</label>
+                        <input type="text" id="accountNumber" placeholder="예: 110-123-45678" autocomplete="off">
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label for="accountType">계좌 유형</label>
+                    <select id="accountType" required>
+                        <option value="General">일반 주식계좌</option>
+                        <option value="ISA">ISA 절세계좌</option>
+                        <option value="Pension">연금저축계좌</option>
+                        <option value="IRP">IRP 퇴직연금</option>
+                        <option value="Overseas">해외 특화계좌</option>
+                    </select>
+                </div>
+                <div class="action-btns" style="margin-top: 1.5rem; justify-content: flex-end;">
+                    <button type="button" class="btn btn-secondary btn-modal-close">취소</button>
+                    <button type="submit" class="btn btn-primary">등록하기</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- MODAL 2: 보유 주식 등록 모달 -->
+    <div class="modal-backdrop" id="modalPortfolio">
+        <div class="modal-content" style="max-width: 550px;">
+            <div class="modal-header">
+                <span class="modal-title">보유 주식 등록</span>
+                <button class="modal-close"><i data-lucide="x"></i></button>
+            </div>
+            <form id="formPortfolio">
+                <div class="form-row">
+                    <div class="form-group">
+                        <label for="portfolioAccount">관리 계좌</label>
+                        <select id="portfolioAccount" required></select>
+                    </div>
+                    <div class="form-group">
+                        <label for="portfolioCurrency">투자 통화</label>
+                        <select id="portfolioCurrency" required>
+                            <option value="KRW">원화 (KRW)</option>
+                            <option value="USD">달러 (USD)</option>
+                        </select>
+                    </div>
+                </div>
+                
+                <div class="form-row">
+                    <div class="form-group">
+                        <label for="portfolioName">종목명</label>
+                        <input type="text" id="portfolioName" placeholder="예: 리얼티인컴, 삼성전자" required autocomplete="off">
+                    </div>
+                    <div class="form-group">
+                        <label for="portfolioTicker">티커 / 종목코드</label>
+                        <input type="text" id="portfolioTicker" placeholder="예: O, 005930" required autocomplete="off">
+                    </div>
+                </div>
+
+                <div class="form-row">
+                    <div class="form-group">
+                        <label for="portfolioShares">보유 수량</label>
+                        <div class="input-with-suffix">
+                            <input type="number" id="portfolioShares" step="any" placeholder="0" required min="0.0001">
+                            <span class="input-suffix">주</span>
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label for="portfolioAvgPrice">평균 매수 단가</label>
+                        <input type="number" id="portfolioAvgPrice" step="any" placeholder="0" required min="0.01">
+                    </div>
+                </div>
+
+                <div class="form-row">
+                    <div class="form-group">
+                        <label for="portfolioAnnualDividend">주당 연배당금</label>
+                        <input type="number" id="portfolioAnnualDividend" step="any" placeholder="예: 3.12 (USD 기준)" required min="0">
+                    </div>
+                    <div class="form-group">
+                        <label for="portfolioFrequency">배당 주기</label>
+                        <select id="portfolioFrequency" required>
+                            <option value="Monthly">월배당 (Monthly)</option>
+                            <option value="Quarterly">분기배당 (Quarterly)</option>
+                            <option value="Semi-Annual">반기배당 (Semi-Annual)</option>
+                            <option value="Annual">연배당 (Annual)</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <label>배당금 지급 월 선택</label>
+                    <div class="months-selection-grid">
+                        <div class="month-checkbox-btn"><input type="checkbox" id="m1" value="1"><label for="m1">1월</label></div>
+                        <div class="month-checkbox-btn"><input type="checkbox" id="m2" value="2"><label for="m2">2월</label></div>
+                        <div class="month-checkbox-btn"><input type="checkbox" id="m3" value="3"><label for="m3">3월</label></div>
+                        <div class="month-checkbox-btn"><input type="checkbox" id="m4" value="4"><label for="m4">4월</label></div>
+                        <div class="month-checkbox-btn"><input type="checkbox" id="m5" value="5"><label for="m5">5월</label></div>
+                        <div class="month-checkbox-btn"><input type="checkbox" id="m6" value="6"><label for="m6">6월</label></div>
+                        <div class="month-checkbox-btn"><input type="checkbox" id="m7" value="7"><label for="m7">7월</label></div>
+                        <div class="month-checkbox-btn"><input type="checkbox" id="m8" value="8"><label for="m8">8월</label></div>
+                        <div class="month-checkbox-btn"><input type="checkbox" id="m9" value="9"><label for="m9">9월</label></div>
+                        <div class="month-checkbox-btn"><input type="checkbox" id="m10" value="10"><label for="m10">10월</label></div>
+                        <div class="month-checkbox-btn"><input type="checkbox" id="m11" value="11"><label for="m11">11월</label></div>
+                        <div class="month-checkbox-btn"><input type="checkbox" id="m12" value="12"><label for="m12">12월</label></div>
+                    </div>
+                </div>
+
+                <div class="action-btns" style="margin-top: 1.5rem; justify-content: flex-end;">
+                    <button type="button" class="btn btn-secondary btn-modal-close">취소</button>
+                    <button type="submit" class="btn btn-primary">등록하기</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- MODAL 3b: 추가 구매 모달 -->
+    <div class="modal-backdrop" id="modalBuyMore">
+        <div class="modal-content" style="max-width: 480px;">
+            <div class="modal-header">
+                <span class="modal-title"><i data-lucide="shopping-cart"></i> 추가 구매 등록</span>
+                <button class="modal-close"><i data-lucide="x"></i></button>
+            </div>
+            <form id="formBuyMore">
+                <div class="form-row">
+                    <div class="form-group">
+                        <label for="buyMoreAccountSelect">보유 계좌 선택</label>
+                        <select id="buyMoreAccountSelect" required>
+                            <option value="">계좌를 먼저 선택하세요</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label for="buyMoreStock">보유 종목 선택</label>
+                        <select id="buyMoreStock" required>
+                            <option value="">종목을 선택하세요</option>
+                        </select>
+                    </div>
+                </div>
+
+                <!-- Current status display -->
+                <div id="buyMoreCurrentInfo" style="background: rgba(99,102,241,0.08); border: 1px solid rgba(99,102,241,0.2); border-radius: 8px; padding: 0.75rem 1rem; margin-bottom: 1rem; display: none; font-size: 0.85rem;">
+                    <div style="font-weight: 600; margin-bottom: 0.4rem; color: var(--primary);">현재 보유 현황</div>
+                    <div style="display: flex; gap: 1.5rem; flex-wrap: wrap; color: var(--text-secondary);">
+                        <span>보유수량: <strong id="buyMoreCurShares" style="color: var(--text-primary);">-</strong></span>
+                        <span>평균단가: <strong id="buyMoreCurAvg" style="color: var(--text-primary);">-</strong></span>
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <label for="buyMoreDate">구매 날짜</label>
+                    <input type="date" id="buyMoreDate" required>
+                </div>
+
+                <div class="form-group">
+                    <label for="buyMoreShares">추가 구매 수량</label>
+                    <div class="input-with-suffix">
+                        <input type="number" id="buyMoreShares" step="any" placeholder="0" required min="0.0001">
+                        <span class="input-suffix">주</span>
+                    </div>
+                </div>
+
+                <div class="form-row">
+                    <div class="form-group">
+                        <label for="buyMorePrice">주당 가격 (단가)</label>
+                        <input type="number" id="buyMorePrice" step="any" placeholder="한 주당 가격" min="0">
+                    </div>
+                    <div class="form-group">
+                        <label for="buyMoreTotalPrice">전체 구매 금액</label>
+                        <input type="number" id="buyMoreTotalPrice" step="any" placeholder="수량 × 단가" min="0">
+                    </div>
+                </div>
+                <div style="font-size: 0.72rem; color: var(--text-secondary); margin-top: -0.5rem; margin-bottom: 0.5rem;">
+                    💡 주당 가격 또는 전체 금액 중 하나를 입력하면 나머지가 자동 계산됩니다.
+                </div>
+
+                <!-- Preview of result after adding -->
+                <div id="buyMorePreview" style="background: rgba(16,185,129,0.08); border: 1px solid rgba(16,185,129,0.2); border-radius: 8px; padding: 0.75rem 1rem; margin-top: 0.5rem; display: none; font-size: 0.85rem;">
+                    <div style="font-weight: 600; margin-bottom: 0.4rem; color: #10b981;">구매 후 예상 결과</div>
+                    <div style="display: flex; gap: 1.5rem; flex-wrap: wrap; color: var(--text-secondary);">
+                        <span>총 수량: <strong id="buyMoreNewShares" style="color: var(--text-primary);">-</strong></span>
+                        <span>새 평균단가: <strong id="buyMoreNewAvg" style="color: var(--text-primary);">-</strong></span>
+                    </div>
+                </div>
+
+                <div class="action-btns" style="margin-top: 1.5rem; justify-content: flex-end;">
+                    <button type="button" class="btn btn-secondary btn-modal-close">취소</button>
+                    <button type="submit" class="btn btn-primary"><i data-lucide="shopping-cart"></i> 추가 구매 반영</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- MODAL 3: 배당금 수령 기록 등록 모달 -->
+    <div class="modal-backdrop" id="modalDividend">
+        <div class="modal-content">
+            <div class="modal-header">
+                <span class="modal-title">배당금 수령 등록</span>
+                <button class="modal-close"><i data-lucide="x"></i></button>
+            </div>
+            <form id="formDividend">
+                <div class="form-row">
+                    <div class="form-group">
+                        <label for="dividendAccountSelect">보유 계좌 선택</label>
+                        <select id="dividendAccountSelect" required>
+                            <option value="">계좌를 먼저 선택하세요</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label for="dividendStock">보유 주식 선택</label>
+                        <select id="dividendStock" required>
+                            <option value="">종목을 선택하세요</option>
+                        </select>
+                    </div>
+                </div>
+                
+                <div class="form-row">
+                    <div class="form-group">
+                        <label for="dividendDate">배당 수령일</label>
+                        <input type="date" id="dividendDate" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="dividendCurrency">배당 통화</label>
+                        <select id="dividendCurrency">
+                            <option value="KRW">KRW (원)</option>
+                            <option value="USD">USD (달러)</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div class="form-row">
+                    <div class="form-group">
+                        <label for="dividendAmountNet">세후 수령액</label>
+                        <input type="number" id="dividendAmountNet" step="any" placeholder="0">
+                    </div>
+                    <div class="form-group">
+                        <label for="dividendTax">원천징수 세금</label>
+                        <input type="number" id="dividendTax" step="any" placeholder="0" min="0">
+                    </div>
+                    <div class="form-group">
+                        <label for="dividendAmount">세전 수령액</label>
+                        <input type="number" id="dividendAmount" step="any" placeholder="0" required min="0.01">
+                    </div>
+                </div>
+
+                <div class="form-group" id="exchangeRateFormGroup" style="display: none;">
+                    <label for="dividendExchangeRate">적용 환율 (달러/원)</label>
+                    <div style="display: flex; gap: 0.5rem; align-items: center;">
+                        <div class="input-with-suffix" style="flex: 1;">
+                            <input type="number" id="dividendExchangeRate" step="any" placeholder="배당일 기준 자동 조회됨">
+                            <span class="input-suffix">원</span>
+                        </div>
+                        <button type="button" id="btnRefreshExchangeRate" class="btn btn-secondary" style="padding: 0.5rem 0.75rem; font-size: 0.8rem; white-space: nowrap; flex-shrink: 0;" title="해당 날짜의 환율 재조회">
+                            <i data-lucide="refresh-cw" style="width:14px;height:14px;"></i> 환율 업데이트
+                        </button>
+                    </div>
+                    <div id="exchangeRateStatus" style="font-size: 0.72rem; color: var(--text-secondary); margin-top: 0.3rem;"></div>
+                </div>
+
+                <div class="action-btns" style="margin-top: 1.5rem; justify-content: flex-end;">
+                    <button type="button" class="btn btn-secondary btn-modal-close">취소</button>
+                    <button type="submit" class="btn btn-primary">등록하기</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- MODAL 4: 데이터 초기화 경고 및 백업 모달 -->
+    <div class="modal-backdrop" id="modalReset">
+        <div class="modal-content">
+            <div class="modal-header">
+                <span class="modal-title" style="color: var(--danger); display: inline-flex; align-items: center; gap: 0.5rem;"><i data-lucide="alert-triangle"></i> 데이터 초기화 경고</span>
+                <button class="modal-close"><i data-lucide="x"></i></button>
+            </div>
+            <div style="font-size: 0.875rem; color: var(--text-secondary); display: flex; flex-direction: column; gap: 1rem;">
+                <p>초기화 실행 시 저장된 모든 계좌 정보, 보유 주식 리스트, 배당금 수령 내역이 <strong>영구적으로 완전히 삭제</strong>되며 다시 복구할 수 없습니다.</p>
+                <p style="background: var(--danger-bg); color: var(--danger); padding: 0.75rem; border-radius: 8px; border: 1px solid rgba(239, 68, 68, 0.2); font-weight: 500;">
+                    안전을 위해 초기화가 실행되기 직전에 <strong>현재 데이터가 백업 파일(.json)로 자동 다운로드</strong>됩니다.
+                </p>
+                <div class="form-group" style="margin-top: 0.5rem;">
+                    <label for="resetPinInput">보안 비밀번호 4자리 입력 (기본값: 0000)</label>
+                    <input type="password" id="resetPinInput" placeholder="비밀번호 입력" maxlength="4" autocomplete="off">
+                </div>
+            </div>
+            <div class="action-btns" style="margin-top: 1rem; justify-content: flex-end;">
+                <button type="button" class="btn btn-secondary btn-modal-close">취소</button>
+                <button type="button" class="btn btn-danger" id="btnExecuteReset" style="background-color: var(--danger); color: white;">백업 후 초기화 실행</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- MODAL 5: 수량 변동 이력 관리 모달 -->
+    <div class="modal-backdrop" id="modalShareHistory">
+        <div class="modal-content" style="max-width: 500px;">
+            <div class="modal-header">
+                <span class="modal-title">보유 수량 변동 이력 관리</span>
+                <button class="modal-close"><i data-lucide="x"></i></button>
+            </div>
+            <div class="modal-body" style="padding-top: 1rem;">
+                <h4 id="shareHistoryStockName" style="margin-bottom: 1rem; color: var(--primary);">종목명</h4>
+                
+                <!-- Form to add new entry -->
+                <form id="formShareHistory" style="background: rgba(255,255,255,0.02); padding: 1.5rem; border-radius: 8px; border: 1px solid rgba(255,255,255,0.05); margin-bottom: 1.5rem;">
+                    <div style="font-size: 0.85rem; font-weight: 600; margin-bottom: 0.75rem; color: var(--text-secondary);">새 수량 이력 기록 추가</div>
+                    <div class="form-row" style="margin-bottom: 0.75rem; display: flex; gap: 1rem;">
+                        <div class="form-group" style="margin-bottom: 0; flex: 1;">
+                            <label for="historyDate" style="font-size: 0.75rem; display: block; margin-bottom: 0.25rem;">변경 기준일</label>
+                            <input type="date" id="historyDate" required style="padding: 0.4rem 0.6rem; font-size: 0.85rem; width: 100%; border-radius: 6px;">
+                        </div>
+                        <div class="form-group" style="margin-bottom: 0; flex: 1;">
+                            <label for="historyShares" style="font-size: 0.75rem; display: block; margin-bottom: 0.25rem;">변경 후 총 수량</label>
+                            <div class="input-with-suffix" style="display: flex; align-items: center; position: relative;">
+                                <input type="number" id="historyShares" step="any" required min="0.0001" style="padding: 0.4rem 0.6rem; font-size: 0.85rem; width: 100%; border-radius: 6px; padding-right: 2rem;">
+                                <span class="input-suffix" style="font-size: 0.8rem; position: absolute; right: 0.5rem; color: var(--text-secondary);">주</span>
+                            </div>
+                        </div>
+                    </div>
+                    <button type="submit" class="btn btn-primary" style="width: 100%; padding: 0.5rem; font-size: 0.85rem; margin-top: 0.5rem;">이력 기록 추가</button>
+                </form>
+
+                <!-- History list table -->
+                <div style="font-size: 0.85rem; font-weight: 600; margin-bottom: 0.5rem; color: var(--text-secondary);">등록된 이력 목록</div>
+                <div class="table-responsive" style="max-height: 250px; overflow-y: auto; border: 1px solid rgba(255,255,255,0.05); border-radius: 6px;">
+                    <table style="font-size: 0.85rem; margin-bottom: 0; width: 100%;">
+                        <thead>
+                            <tr style="background: rgba(255,255,255,0.02);">
+                                <th style="padding: 0.5rem; text-align: left;">날짜</th>
+                                <th style="padding: 0.5rem; text-align: left;">수량</th>
+                                <th style="width: 70px; text-align: center; padding: 0.5rem;">삭제</th>
+                            </tr>
+                        </thead>
+                        <tbody id="shareHistoryTableBody">
+                            <!-- Dynamic rows -->
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+            <div class="action-btns" style="margin-top: 1.5rem; justify-content: flex-end;">
+                <button type="button" class="btn btn-secondary btn-modal-close">닫기</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- MODAL 6: Google Drive Cloud Sync Modal -->
+    <div class="modal-backdrop" id="modalGDrive">
+        <div class="modal-content" style="max-width: 450px;">
+            <div class="modal-header">
+                <span class="modal-title" style="display: flex; align-items: center; gap: 0.5rem;"><i data-lucide="cloud"></i> 구글 드라이브 실시간 연동 설정</span>
+                <button class="btn-close btn-modal-close"><i data-lucide="x"></i></button>
+            </div>
+            <div class="modal-body" style="font-size: 0.85rem; line-height: 1.5;">
+                <p style="color: var(--text-secondary); margin-bottom: 1rem;">
+                    Google Drive에 배당 포트폴리오를 실시간 동기화하여 PC와 스마트폰 간에 데이터를 자동으로 주고받습니다.
+                </p>
+
+                <!-- Step 1: Input Client ID -->
+                <div class="form-group" style="margin-bottom: 1.25rem;">
+                    <label for="gDriveClientId" style="font-weight: 600; display: block; margin-bottom: 0.35rem;">1. Google OAuth Client ID 입력</label>
+                    <input type="text" id="gDriveClientId" class="form-control" placeholder="12345678-abc.apps.googleusercontent.com" style="width: 100%; font-size: 0.8rem; padding: 0.5rem; border-radius: 6px; background: var(--input-bg); border: 1px solid var(--input-border); color: var(--text-primary);">
+                    
+                    <!-- Client ID Guide -->
+                    <details style="margin-top: 0.5rem; font-size: 0.72rem; color: var(--text-secondary); background: rgba(255,255,255,0.02); padding: 0.5rem; border-radius: 6px;">
+                        <summary style="cursor: pointer; font-weight: 500; color: var(--primary);">구글 Client ID 발급 방법 (무료, 2분 소요)</summary>
+                        <ol style="margin-top: 0.25rem; padding-left: 1.25rem; display: flex; flex-direction: column; gap: 0.25rem;">
+                            <li><a href="https://console.cloud.google.com/" target="_blank" style="color: var(--primary); text-decoration: underline;">Google Cloud Console</a>에 로그인합니다.</li>
+                            <li>프로젝트를 생성하고 <strong>'Google Drive API'</strong>를 사용 설정합니다.</li>
+                            <li><strong>'OAuth 동의 화면'</strong>에서 외부(External)로 구성하고, 범위에 <code>.../auth/drive.appdata</code>를 추가합니다.</li>
+                            <li><strong>'사용자 인증 정보'</strong>에서 [사용자 인증 정보 만들기] ➔ [OAuth 클라이언트 ID] (웹 애플리케이션)를 선택합니다.</li>
+                            <li><strong>승인된 JavaScript 원본</strong>에 다음 주소들을 추가합니다:<br>
+                                - <code>http://localhost:5000</code><br>
+                                - <code>http://127.0.0.1:5000</code>
+                            </li>
+                            <li>발급된 클라이언트 ID를 복사하여 여기에 붙여넣고 저장하세요.</li>
+                        </ol>
+                    </details>
+                </div>
+
+                <!-- Step 2: Sign In / Out -->
+                <div style="margin-bottom: 1.25rem; padding: 0.75rem; border-radius: 8px; background: rgba(255,255,255,0.02); border: 1px solid var(--border-color);">
+                    <div style="font-weight: 600; margin-bottom: 0.5rem;">2. 구글 계정 인증</div>
+                    
+                    <div style="display: flex; gap: 0.5rem; align-items: center; margin-top: 0.5rem; flex-wrap: wrap;">
+                        <button id="btnGDriveLogin" class="btn btn-primary" style="padding: 0.4rem 0.75rem; font-size: 0.8rem; display: flex; align-items: center; gap: 0.25rem; height: auto;">
+                            <i data-lucide="log-in"></i> 구글 로그인 & 연동 시작
+                        </button>
+                        <button id="btnGDriveLogout" class="btn btn-secondary" style="padding: 0.4rem 0.75rem; font-size: 0.8rem; display: none; height: auto;">
+                            연동 해제 (로그아웃)
+                        </button>
+                        <span id="gDriveAccountName" style="font-size: 0.8rem; color: var(--text-secondary); font-weight: 500;">연동되어 있지 않음</span>
+                    </div>
+                </div>
+
+                <!-- Sync Action Buttons -->
+                <div style="display: flex; gap: 0.5rem; margin-top: 1rem; padding-top: 1rem; border-top: 1px solid var(--border-color);">
+                    <button id="btnGDrivePull" class="btn btn-secondary" style="font-size: 0.8rem; padding: 0.4rem 0.75rem; flex: 1; height: auto;" disabled>
+                        <i data-lucide="arrow-down-circle"></i> 클라우드에서 당겨오기 (PULL)
+                    </button>
+                    <button id="btnGDrivePush" class="btn btn-secondary" style="font-size: 0.8rem; padding: 0.4rem 0.75rem; flex: 1; height: auto;" disabled>
+                        <i data-lucide="arrow-up-circle"></i> 클라우드로 밀어넣기 (PUSH)
+                    </button>
+                </div>
+                
+                <div id="gDriveSyncLog" style="font-size: 0.72rem; color: var(--text-muted); margin-top: 0.75rem; text-align: center;">
+                    * 연동을 시작하려면 먼저 Client ID를 입력하고 저장해 주세요.
+                </div>
+            </div>
+            <div class="action-btns" style="margin-top: 1.5rem; justify-content: flex-end;">
+                <button type="button" class="btn btn-primary" id="btnSaveGDriveConfig">설정 완료</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Floating AI Assistant Chat Button -->
+    <button id="btnOpenAIChat" class="floating-ai-btn" title="배당 AI 비서">
+        <i data-lucide="sparkles" style="width: 22px; height: 22px; color: white;"></i>
+    </button>
+
+    <!-- AI Chat Window -->
+    <div id="aiChatDrawer" class="ai-chat-drawer">
+        <div class="ai-chat-header">
+            <div style="display: flex; align-items: center; gap: 0.5rem;">
+                <i data-lucide="sparkles" style="width: 16px; height: 16px; color: var(--primary);"></i>
+                <span style="font-weight: 700; font-size: 0.9rem; color: var(--text-primary); margin: 0;">배당 AI 비서</span>
+                <span id="aiKeyStatusDot" class="status-dot offline" title="API 키 미설정"></span>
+            </div>
+            <div style="display: flex; gap: 0.35rem; align-items: center; margin-left: auto;">
+                <button id="btnAIChatConfig" class="btn-chat-action" title="Gemini API Key 설정">
+                    <i data-lucide="key" style="width: 14px; height: 14px;"></i>
+                </button>
+                <button id="btnCloseAIChat" class="btn-chat-action" title="닫기">
+                    <i data-lucide="x" style="width: 14px; height: 14px;"></i>
+                </button>
+            </div>
+        </div>
+        
+        <!-- API Key Input Overlay (Initially hidden) -->
+        <div id="aiChatConfigOverlay" class="ai-chat-overlay" style="display: none;">
+            <div style="font-weight: 600; font-size: 0.85rem; color: var(--text-primary); margin-bottom: 0.5rem;">Google Gemini API Key 설정</div>
+            <p style="font-size: 0.72rem; color: var(--text-secondary); line-height: 1.4; margin-bottom: 0.75rem;">
+                AI 비서를 사용하려면 Gemini API Key가 필요합니다. <a href="https://aistudio.google.com/" target="_blank" style="color: var(--primary); text-decoration: underline;">Google AI Studio</a>에서 무료로 키를 받으실 수 있습니다.
+            </p>
+            <div class="form-group" style="margin-bottom: 0.75rem;">
+                <input type="password" id="aiApiKeyInput" class="form-control" style="font-size: 0.8rem; padding: 0.4rem 0.6rem; border-radius: 6px; background: var(--card-bg); border: 1px solid var(--border-color); color: var(--text-primary); width: 100%;" placeholder="AIzaSy...">
+            </div>
+            <div style="display: flex; gap: 0.5rem; justify-content: flex-end;">
+                <button id="btnCancelAIConfig" class="btn btn-secondary" style="padding: 0.25rem 0.5rem; font-size: 0.75rem; border-radius: 4px; height: auto;">취소</button>
+                <button id="btnSaveAIConfig" class="btn btn-primary" style="padding: 0.25rem 0.5rem; font-size: 0.75rem; border-radius: 4px; height: auto;">저장</button>
+            </div>
+        </div>
+
+        <!-- Chat messages list -->
+        <div id="aiChatMessages" class="ai-chat-messages">
+            <div class="chat-message system">
+                안녕하세요! 사용자님의 포트폴리오를 관리하고 분석하는 **배당 AI 비서**입니다. ✨<br><br>
+                현재 보유 종목의 배당일 분석, 추가 매수 시뮬레이션뿐만 아니라, **"오늘 SCHD 10주 78달러에 추가구매 기록해줘"**와 같이 자연스러운 대화로 거래 내역을 바로 포트폴리오에 기입하도록 지시할 수도 있습니다!<br><br>
+                <span style="font-size: 0.72rem; color: var(--text-secondary); font-weight: 500;">
+                    ⚠️ 먼저 우상단의 열쇠(<i data-lucide="key" style="display: inline-block; width: 10px; height: 10px; margin: 0 1px; vertical-align: middle;"></i>) 아이콘을 눌러 무료 Gemini API 키를 저장해 주세요.
+                </span>
+            </div>
+        </div>
+
+        <!-- Chat Input area -->
+        <div class="ai-chat-input-area">
+            <input type="text" id="aiChatInput" placeholder="무엇이든 물어보세요..." style="flex: 1; font-size: 0.8rem; padding: 0.5rem 0.75rem; border-radius: 6px; border: 1px solid var(--border-color); background: var(--card-bg); color: var(--text-primary);">
+            <button id="btnSendAIChat" class="btn btn-primary" style="padding: 0.5rem; display: flex; align-items: center; justify-content: center; border-radius: 6px; flex-shrink: 0; width: 34px; height: 34px;">
+                <i data-lucide="send" style="width: 14px; height: 14px; color: white;"></i>
+            </button>
+        </div>
+    </div>
+
+    <!-- Core App Logic -->
+    <script src="app.js"></script>
+</body>
+</html>
