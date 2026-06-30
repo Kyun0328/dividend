@@ -220,7 +220,22 @@ async function fetchStockPrice(ticker, currency) {
     for (const t of candidateTickers) {
         const targetUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${t}?interval=1d&range=1d`;
         
-        // Proxy A: AllOrigins (Supports Yahoo Finance very well without CORS block)
+        // Proxy A: CorsProxy.io (Extremely fast, edge native, allows Yahoo Finance!)
+        try {
+            const proxyUrl = `https://corsproxy.io/?${encodeURIComponent(targetUrl)}`;
+            const res = await fetch(proxyUrl, { signal: AbortSignal.timeout(6000) });
+            if (res.ok) {
+                const data = await res.json();
+                const price = parseYahooPrice(data);
+                if (price !== null && price > 0) {
+                    return { price, currency: currency === 'KRW' ? 'KRW' : 'USD' };
+                }
+            }
+        } catch (e) {
+            console.warn(`Proxy A (CorsProxy.io) failed for ${t}:`, e.message);
+        }
+
+        // Proxy B: AllOrigins (Supports Yahoo Finance, reliable backup)
         try {
             const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(targetUrl)}`;
             const res = await fetch(proxyUrl, { signal: AbortSignal.timeout(8000) });
@@ -235,10 +250,10 @@ async function fetchStockPrice(ticker, currency) {
                 }
             }
         } catch (e) {
-            console.warn(`Proxy A (AllOrigins) failed for ${t}:`, e.message);
+            console.warn(`Proxy B (AllOrigins) failed for ${t}:`, e.message);
         }
         
-        // Proxy B: CORS.LOL (High availability backup for Yahoo Finance)
+        // Proxy C: CORS.LOL (High availability backup)
         try {
             const proxyUrl = `https://cors.lol/?url=${encodeURIComponent(targetUrl)}`;
             const res = await fetch(proxyUrl, { signal: AbortSignal.timeout(8000) });
@@ -250,7 +265,7 @@ async function fetchStockPrice(ticker, currency) {
                 }
             }
         } catch (e) {
-            console.warn(`Proxy B (CORS.LOL) failed for ${t}:`, e.message);
+            console.warn(`Proxy C (CORS.LOL) failed for ${t}:`, e.message);
         }
     }
     
