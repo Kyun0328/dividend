@@ -1,19 +1,29 @@
 // State Management
+const APP_VERSION = '2.0.0-stability';
+const core = window.DividendCore;
+if (!core) throw new Error('data-core.js must be loaded before app.js');
+
 let state = {
+    schemaVersion: core.SCHEMA_VERSION,
     accounts: [],
     portfolio: [],
     dividendLogs: [],
     shareHistory: [], // [{ id, portfolioId, date, shares }]
-    exchangeRateCache: {}, // Date YYYY-MM-DD -> KRW rate
-    stockPrices: {},        // { ticker: { price, currency, lastUpdated } }
-    lastPriceUpdate: null,  // ISO timestamp of last price fetch
+    exchangeRateCache: {}, // Date YYYY-MM-DD -> { rate, requestedDate, rateDate, source }
+    stockPrices: {},        // { "TICKER|CURRENCY": { price, quoteTimestamp, fetchedAt, ... } }
+    lastPriceUpdate: null,  // Backward-compatible alias of last successful price fetch
+    priceUpdateStatus: { lastAttemptAt: null, lastSuccessAt: null, successCount: 0, failCount: 0 },
     activeCurrency: 'KRW', // Display currency: KRW or USD
-    currentExchangeRate: 1535, // Live/recent exchange rate
-    lastBackupMonth: '' // YYYY-MM to track auto backups
+    currentExchangeRate: null, // Last successfully validated KRW/USD rate
+    currentExchangeRateMeta: { status: 'idle', rate: null, provider: null, asOf: null, fetchedAt: null, nextUpdateAt: null, error: null },
+    lastBackupMonth: '', // YYYY-MM to track auto backups
+    syncMeta: { localRevision: 0, updatedAt: null }
 };
 
-// Constant Fallback Exchange Rate
-const FALLBACK_EXCHANGE_RATE = 1535;
+let currentExchangeRatePromise = null;
+let priceUpdatePromise = null;
+let historicalRateRequestSequence = 0;
+let storageWriteBlocked = false;
 
 // Chart Instances
 let monthlyChart = null;
@@ -28,14 +38,14 @@ let editingDividendId = null;
 
 
 // Initialize App
-document.addEventListener('DOMContentLoaded', async () => {
+document.addEventListener('DOMContentLoaded', () => {
     loadState();
     setupEventListeners();
-    await updateCurrentExchangeRate();
     renderAll();
-    await fetchAllStockPrices(); // Fetch current stock prices
     checkMonthlyBackup();
     setupAIChat(); // Initialize AI Chatbot
+    setupVersionUI();
+    void refreshMarketData({ automatic: true });
 });
 
 // Load State from LocalStorage
@@ -43,20 +53,22 @@ function loadState() {
     const savedState = localStorage.getItem('dividend_tracker_state');
     if (savedState) {
         try {
-            state = { ...state, ...JSON.parse(savedState) };
-            // Ensure fields exist
-            if (!state.accounts) state.accounts = [];
-            if (!state.portfolio) state.portfolio = [];
-            if (!state.dividendLogs) state.dividendLogs = [];
-            if (!state.shareHistory) state.shareHistory = [];
-            if (!state.exchangeRateCache) state.exchangeRateCache = {};
-            if (!state.stockPrices) state.stockPrices = {};
-            if (!state.lastPriceUpdate) state.lastPriceUpdate = null;
-            if (!state.activeCurrency) state.activeCurrency = 'KRW';
-            if (!state.lastBackupMonth) state.lastBackupMonth = '';
+            const parsedState = JSON.parse(savedState);
+            const migratedState = core.migrateState(parsedState, state);
+            if ((Number(parsedState.schemaVersion) || 0) < core.SCHEMA_VERSION && !localStorage.getItem('dividend_tracker_state_pre_v2')) {
+                localStorage.setItem('dividend_tracker_state_pre_v2', savedState);
+            }
+            state = migratedState;
+            persistLocalState();
         } catch (e) {
             console.error("Error parsing saved state:", e);
-            showToast("데이터를 불러오는 중 오류가 발생했습니다.", "danger");
+            storageWriteBlocked = true;
+            try {
+                if (!localStorage.getItem('dividend_tracker_state_load_error')) {
+                    localStorage.setItem('dividend_tracker_state_load_error', savedState);
+                }
+            } catch (_) {}
+            showToast("���� �곗씠�곕� �쎌� 紐삵빐 �먮룞 ���κ낵 Drive �숆린�붾� 李⑤떒�덉뒿�덈떎. JSON 諛깆뾽 蹂듭썝 �먮뒗 珥덇린�붽� �꾩슂�⑸땲��.", "danger");
         }
     } else {
         // Load mock data if empty to give user a nice first impression
@@ -65,12 +77,30 @@ function loadState() {
 }
 
 // Save State to LocalStorage
-function saveState() {
-    localStorage.setItem('dividend_tracker_state', JSON.stringify(state));
-    // Trigger GDrive auto-save if authenticated
-    if (typeof pushStateToGDrive === 'function') {
-        pushStateToGDrive();
+function persistLocalState() {
+    if (storageWriteBlocked) return false;
+    try {
+        localStorage.setItem('dividend_tracker_state', JSON.stringify(state));
+        return true;
+    } catch (error) {
+        storageWriteBlocked = true;
+        console.error('Local state write failed:', error);
+        return false;
     }
+}
+
+function saveState({ sync = true } = {}) {
+    if (sync) {
+        state.syncMeta = state.syncMeta || { localRevision: 0, updatedAt: null };
+        state.syncMeta.localRevision = (Number(state.syncMeta.localRevision) || 0) + 1;
+        state.syncMeta.updatedAt = new Date().toISOString();
+    }
+    if (!persistLocalState()) return false;
+    // Trigger GDrive auto-save if authenticated
+    if (sync && typeof queueGDrivePush === 'function') {
+        queueGDrivePush();
+    }
+    return true;
 }
 
 // Automatic Monthly Backup Checker
@@ -84,7 +114,7 @@ function checkMonthlyBackup() {
     if (state.lastBackupMonth !== currentMonthStr) {
         // Trigger auto backup file download
         exportDataJSON();
-        showToast("새로운 달이 시작되어 이번 달 데이터 백업 파일을 자동으로 다운로드했습니다.", "success");
+        showToast("�덈줈�� �ъ씠 �쒖옉�섏뼱 �대쾲 �� �곗씠�� 諛깆뾽 �뚯씪�� �먮룞�쇰줈 �ㅼ슫濡쒕뱶�덉뒿�덈떎.", "success");
         
         state.lastBackupMonth = currentMonthStr;
         saveState();
@@ -94,16 +124,16 @@ function checkMonthlyBackup() {
 // Mock Data for First Impression
 function loadMockData() {
     state.accounts = [
-        { id: 'acc-1', name: '일반 주식계좌', type: 'General', accountNumber: '110-123-45678' },
-        { id: 'acc-2', name: 'ISA 절세계좌', type: 'ISA', accountNumber: '230-987-65432' },
-        { id: 'acc-3', name: '연금저축계좌', type: 'Pension', accountNumber: '340-111-22222' }
+        { id: 'acc-1', name: '�쇰컲 二쇱떇怨꾩쥖', type: 'General', accountNumber: '110-123-45678' },
+        { id: 'acc-2', name: 'ISA �덉꽭怨꾩쥖', type: 'ISA', accountNumber: '230-987-65432' },
+        { id: 'acc-3', name: '�곌툑��異뺢퀎醫�', type: 'Pension', accountNumber: '340-111-22222' }
     ];
 
     state.portfolio = [
-        { id: 'port-1', accountId: 'acc-1', name: '리얼티인컴', ticker: 'O', shares: 150, avgPrice: 55.4, currency: 'USD', annualDividend: 3.12, frequency: 'Monthly', exMonths: [1,2,3,4,5,6,7,8,9,10,11,12] },
+        { id: 'port-1', accountId: 'acc-1', name: '由ъ뼹�곗씤而�', ticker: 'O', shares: 150, avgPrice: 55.4, currency: 'USD', annualDividend: 3.12, frequency: 'Monthly', exMonths: [1,2,3,4,5,6,7,8,9,10,11,12] },
         { id: 'port-2', accountId: 'acc-2', name: 'SCHD', ticker: 'SCHD', shares: 100, avgPrice: 78.2, currency: 'USD', annualDividend: 2.88, frequency: 'Quarterly', exMonths: [3,6,9,12] },
-        { id: 'port-3', accountId: 'acc-2', name: '삼성전자우', ticker: '005935', shares: 200, avgPrice: 62000, currency: 'KRW', annualDividend: 1444, frequency: 'Quarterly', exMonths: [4,5,8,11] }, // Samsung Ele Pref payout months roughly
-        { id: 'port-4', accountId: 'acc-3', name: '맥쿼리인프라', ticker: '088980', shares: 500, avgPrice: 12100, currency: 'KRW', annualDividend: 760, frequency: 'Semi-Annual', exMonths: [2, 8] }
+        { id: 'port-3', accountId: 'acc-2', name: '�쇱꽦�꾩옄��', ticker: '005935', shares: 200, avgPrice: 62000, currency: 'KRW', annualDividend: 1444, frequency: 'Quarterly', exMonths: [4,5,8,11] }, // Samsung Ele Pref payout months roughly
+        { id: 'port-4', accountId: 'acc-3', name: '留μ옘由ъ씤�꾨씪', ticker: '088980', shares: 500, avgPrice: 12100, currency: 'KRW', annualDividend: 760, frequency: 'Semi-Annual', exMonths: [2, 8] }
     ];
 
     // Log history (past 6 months)
@@ -140,60 +170,209 @@ function loadMockData() {
     saveState();
 }
 
-// Fetch Current Exchange Rate on Init
+function fetchWithTimeout(url, options = {}, timeoutMs = 8000) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+    const externalSignal = options.signal;
+    if (externalSignal) {
+        if (externalSignal.aborted) controller.abort();
+        else externalSignal.addEventListener('abort', () => controller.abort(), { once: true });
+    }
+    return fetch(url, { ...options, signal: controller.signal }).finally(() => clearTimeout(timeoutId));
+}
+
+async function fetchJsonWithTimeout(url, options = {}, timeoutMs = 8000) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+        const response = await fetch(url, { ...options, signal: controller.signal });
+        const data = await response.json();
+        return { response, data };
+    } finally {
+        clearTimeout(timeoutId);
+    }
+}
+
+function unixToIso(value) {
+    const number = Number(value);
+    return Number.isFinite(number) && number > 0 ? new Date(number * 1000).toISOString() : null;
+}
+
+// Fetch Current Exchange Rate. Failure preserves the last validated value.
 async function updateCurrentExchangeRate() {
-    try {
-        const response = await fetch('https://open.er-api.com/v6/latest/USD');
-        if (response.ok) {
-            const data = await response.json();
-            state.currentExchangeRate = data.rates.KRW;
-            console.log("API Exchange Rate loaded from Open ER API:", state.currentExchangeRate);
-        } else {
-            state.currentExchangeRate = FALLBACK_EXCHANGE_RATE;
+    if (currentExchangeRatePromise) return currentExchangeRatePromise;
+    currentExchangeRatePromise = (async () => {
+        try {
+            const previousMeta = state.currentExchangeRateMeta || {};
+            if (previousMeta.status === 'success' && previousMeta.nextUpdateAt && Date.now() < new Date(previousMeta.nextUpdateAt).getTime()) {
+                return { ok: true, cached: true, ...previousMeta };
+            }
+            const { response, data } = await fetchJsonWithTimeout('https://open.er-api.com/v6/latest/USD', {}, 8000);
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            const rate = Number(data?.rates?.KRW);
+            if (data?.result !== 'success' || !core.isPositiveNumber(rate)) throw new Error('KRW �섏쑉 媛� �꾨씫');
+            const fetchedAt = new Date().toISOString();
+            state.currentExchangeRate = rate;
+            state.currentExchangeRateMeta = {
+                status: 'success', rate, provider: 'Open ExchangeRate-API',
+                asOf: unixToIso(data.time_last_update_unix),
+                fetchedAt,
+                nextUpdateAt: unixToIso(data.time_next_update_unix),
+                error: null
+            };
+            saveState({ sync: false });
+            return { ok: true, ...state.currentExchangeRateMeta };
+        } catch (error) {
+            state.currentExchangeRateMeta = {
+                ...(state.currentExchangeRateMeta || {}),
+                status: 'error', rate: state.currentExchangeRate || null,
+                error: error?.name === 'AbortError' ? '�붿껌 �쒓컙 珥덇낵' : (error?.message || '議고쉶 �ㅽ뙣'),
+                lastAttemptAt: new Date().toISOString()
+            };
+            saveState({ sync: false });
+            return { ok: false, rate: state.currentExchangeRate || null, error: state.currentExchangeRateMeta.error };
+        } finally {
+            currentExchangeRatePromise = null;
+            updatePriceTimestamp();
         }
-    } catch (e) {
-        console.error("Exchange rate API call failed, using fallback:", e);
-        state.currentExchangeRate = FALLBACK_EXCHANGE_RATE;
-    }
+    })();
+    return currentExchangeRatePromise;
 }
 
-// Fetch Historical Exchange Rate
+// Fetch Historical Exchange Rate. Failure never pretends the current rate is historical.
 async function getHistoricalExchangeRate(dateStr) {
-    if (dateStr === "") return FALLBACK_EXCHANGE_RATE;
-    
-    // Check Cache
-    if (state.exchangeRateCache[dateStr]) {
-        return state.exchangeRateCache[dateStr];
-    }
-    
+    if (!dateStr) return { ok: false, error: '�좎쭨 �놁쓬', requestedDate: dateStr };
+    const cached = core.normalizeHistoricalRateEntry(state.exchangeRateCache[dateStr], dateStr);
+    if (cached?.basisKnown) return { ok: true, cached: true, ...cached };
     try {
-        // Query Frankfurter API (updated domain and params)
-        const response = await fetch(`https://api.frankfurter.dev/v1/${dateStr}?base=USD&symbols=KRW`);
-        if (response.ok) {
-            const data = await response.json();
-            const rate = data.rates.KRW;
-            state.exchangeRateCache[dateStr] = rate;
-            saveState();
-            return rate;
-        }
-    } catch (e) {
-        console.error(`Failed to fetch exchange rate for date ${dateStr}:`, e);
+        const { response, data } = await fetchJsonWithTimeout(`https://api.frankfurter.dev/v1/${dateStr}?base=USD&symbols=KRW`, {}, 8000);
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const rate = Number(data?.rates?.KRW);
+        if (!core.isPositiveNumber(rate) || !/^\d{4}-\d{2}-\d{2}$/.test(data?.date || '')) throw new Error('�섏쑉 �먮뒗 湲곗��� �꾨씫');
+        const entry = {
+            status: 'success', rate, requestedDate: dateStr, rateDate: data.date,
+            source: 'Frankfurter v1', basisKnown: true, fetchedAt: new Date().toISOString()
+        };
+        state.exchangeRateCache[dateStr] = entry;
+        saveState({ sync: false });
+        return { ok: true, cached: false, ...entry };
+    } catch (error) {
+        return {
+            ok: false, requestedDate: dateStr,
+            fallbackRate: core.isPositiveNumber(state.currentExchangeRate) ? state.currentExchangeRate : null,
+            error: error?.name === 'AbortError' ? '�붿껌 �쒓컙 珥덇낵' : (error?.message || '議고쉶 �ㅽ뙣')
+        };
     }
-    
-    return state.currentExchangeRate || FALLBACK_EXCHANGE_RATE;
 }
 
-// Fetch a single stock's current price (Serverless fallback using public CORS proxies)
+function getConfiguredWorkerUrl() {
+    const value = (localStorage.getItem('price_worker_url') || '').trim().replace(/\/$/, '');
+    if (!value) return '';
+    try {
+        const parsed = new URL(value);
+        if (parsed.protocol !== 'https:' && parsed.hostname !== 'localhost' && parsed.hostname !== '127.0.0.1') return '';
+        return parsed.origin + parsed.pathname.replace(/\/$/, '');
+    } catch (_) {
+        return '';
+    }
+}
+
+function parseYahooQuote(data, requestedCurrency, symbol, route) {
+    const meta = data?.chart?.result?.[0]?.meta;
+    const validated = core.validatePriceQuote(meta, symbol, requestedCurrency);
+    if (!validated) return null;
+    const price = validated.price;
+    const quoteTimestamp = Number.isFinite(Number(meta?.regularMarketTime))
+        ? new Date(Number(meta.regularMarketTime) * 1000).toISOString()
+        : null;
+    return {
+        price,
+        currency: requestedCurrency,
+        upstreamCurrency: meta?.currency || null,
+        symbol,
+        provider: 'Yahoo Finance chart',
+        route,
+        quoteTimestamp,
+        fetchedAt: new Date().toISOString()
+    };
+}
+
+async function fetchViaConfiguredWorker(symbol, currency) {
+    const base = getConfiguredWorkerUrl();
+    if (!base) return null;
+    const { response, data } = await fetchJsonWithTimeout(`${base}/price?symbol=${encodeURIComponent(symbol)}`, {}, 7000);
+    if (!response.ok) throw new Error(`Worker HTTP ${response.status}`);
+    const price = Number(data?.price);
+    if (!core.validatePriceQuote({ price, symbol: data?.symbol, currency: data?.currency }, symbol, currency)) {
+        throw new Error('Worker �묐떟 寃�利� �ㅽ뙣');
+    }
+    return {
+        price, currency, upstreamCurrency: data.currency || null, symbol,
+        provider: data.provider || '媛쒖씤 �쒖꽭 Worker', route: 'configured-worker',
+        quoteTimestamp: data.quoteTimestamp || null, fetchedAt: new Date().toISOString()
+    };
+}
+
+async function fetchViaPublicProxies(targetUrl, symbol, currency) {
+    let routes = [
+        {
+            name: 'corsproxy.io',
+            url: `https://corsproxy.io/?url=${encodeURIComponent(targetUrl)}`,
+            unwrap: data => data
+        },
+        {
+            name: 'AllOrigins',
+            url: `https://api.allorigins.win/get?url=${encodeURIComponent(targetUrl)}`,
+            unwrap: data => data?.contents ? (typeof data.contents === 'string' ? JSON.parse(data.contents) : data.contents) : null
+        },
+        {
+            name: 'api.cors.lol',
+            url: `https://api.cors.lol/?url=${encodeURIComponent(targetUrl)}`,
+            unwrap: data => data
+        }
+    ];
+
+    const preferredRoute = localStorage.getItem('price_proxy_route');
+    if (preferredRoute) routes = routes.sort((a, b) => (a.name === preferredRoute ? -1 : b.name === preferredRoute ? 1 : 0));
+    const attemptRoute = async (route, timeoutMs) => {
+        const { response, data: raw } = await fetchJsonWithTimeout(route.url, {}, timeoutMs);
+        if (!response.ok) throw new Error(`${route.name} HTTP ${response.status}`);
+        const data = route.unwrap(raw);
+        const quote = parseYahooQuote(data, currency, symbol, route.name);
+        if (!quote) throw new Error(`${route.name} 媛�寃� �꾨씫`);
+        return quote;
+    };
+    if (preferredRoute && routes[0]?.name === preferredRoute) {
+        try {
+            return await attemptRoute(routes[0], 4500);
+        } catch (_) {
+            routes = routes.slice(1);
+        }
+    }
+    const settled = await Promise.allSettled(routes.map(route => attemptRoute(route, 7000)));
+    const success = settled.find(result => result.status === 'fulfilled');
+    if (success) {
+        localStorage.setItem('price_proxy_route', success.value.route);
+        return success.value;
+    }
+    throw new Error(settled.map(result => result.reason?.message).filter(Boolean).join(' / ') || '怨듦컻 寃쎈줈 �ㅽ뙣');
+}
+
+// Fetch a single stock's current price.
 async function fetchStockPrice(ticker, currency) {
     // 1. Try local server first if running locally
     if (window.location.hostname === '127.0.0.1' || window.location.hostname === 'localhost' || window.location.protocol === 'file:') {
         try {
             const url = `http://127.0.0.1:5000/api/price?ticker=${encodeURIComponent(ticker)}&currency=${encodeURIComponent(currency)}`;
-            const response = await fetch(url, { signal: AbortSignal.timeout(4000) });
+            const { response, data } = await fetchJsonWithTimeout(url, {}, 4000);
             if (response.ok) {
-                const data = await response.json();
                 if (data.price && data.price > 0) {
-                    return { price: data.price, currency: data.currency || currency };
+                    return {
+                        price: Number(data.price), currency: data.currency || currency,
+                        upstreamCurrency: data.currency || null, symbol: ticker,
+                        provider: data.source || '濡쒖뺄 �쒖꽭 �쒕쾭', route: 'local-server',
+                        quoteTimestamp: data.quoteTimestamp || null, fetchedAt: new Date().toISOString()
+                    };
                 }
             }
         } catch (e) {
@@ -208,148 +387,114 @@ async function fetchStockPrice(ticker, currency) {
         candidateTickers = [`${ticker}.KS`, `${ticker}.KQ`];
     }
     
-    const parseYahooPrice = (data) => {
-        const result = data?.chart?.result;
-        if (result && result.length > 0 && result[0] !== null) {
-            return parseFloat(result[0].meta.regularMarketPrice);
-        }
-        return null;
-    };
-
     // Try candidates (.KS first, then .KQ if .KS fails)
+    const errors = [];
     for (const t of candidateTickers) {
-        const targetUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${t}?interval=1d&range=1d`;
-        
-        // Proxy A: CorsProxy.io (Extremely fast, edge native, allows Yahoo Finance!)
+        const targetUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(t)}?interval=1d&range=5d`;
         try {
-            const proxyUrl = `https://corsproxy.io/?${encodeURIComponent(targetUrl)}`;
-            const res = await fetch(proxyUrl, { signal: AbortSignal.timeout(6000) });
-            if (res.ok) {
-                const data = await res.json();
-                const price = parseYahooPrice(data);
-                if (price !== null && price > 0) {
-                    return { price, currency: currency === 'KRW' ? 'KRW' : 'USD' };
-                }
-            }
-        } catch (e) {
-            console.warn(`Proxy A (CorsProxy.io) failed for ${t}:`, e.message);
+            const workerQuote = await fetchViaConfiguredWorker(t, currency);
+            if (workerQuote) return workerQuote;
+        } catch (error) {
+            errors.push(error.message);
         }
-
-        // Proxy B: AllOrigins (Supports Yahoo Finance, reliable backup)
         try {
-            const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(targetUrl)}`;
-            const res = await fetch(proxyUrl, { signal: AbortSignal.timeout(8000) });
-            if (res.ok) {
-                const wrapper = await res.json();
-                if (wrapper && wrapper.contents) {
-                    const data = typeof wrapper.contents === 'string' ? JSON.parse(wrapper.contents) : wrapper.contents;
-                    const price = parseYahooPrice(data);
-                    if (price !== null && price > 0) {
-                        return { price, currency: currency === 'KRW' ? 'KRW' : 'USD' };
-                    }
-                }
-            }
-        } catch (e) {
-            console.warn(`Proxy B (AllOrigins) failed for ${t}:`, e.message);
-        }
-        
-        // Proxy C: CORS.LOL (High availability backup)
-        try {
-            const proxyUrl = `https://cors.lol/?url=${encodeURIComponent(targetUrl)}`;
-            const res = await fetch(proxyUrl, { signal: AbortSignal.timeout(8000) });
-            if (res.ok) {
-                const data = await res.json();
-                const price = parseYahooPrice(data);
-                if (price !== null && price > 0) {
-                    return { price, currency: currency === 'KRW' ? 'KRW' : 'USD' };
-                }
-            }
-        } catch (e) {
-            console.warn(`Proxy C (CORS.LOL) failed for ${t}:`, e.message);
+            return await fetchViaPublicProxies(targetUrl, t, currency);
+        } catch (error) {
+            errors.push(error.message);
         }
     }
-    
-    return null;
+    throw new Error(errors.join(' / ') || '媛�寃� 議고쉶 �ㅽ뙣');
 }
 
-// Fetch prices for all portfolio stocks
-async function fetchAllStockPrices() {
-    if (state.portfolio.length === 0) return;
-    
+async function refreshMarketData({ automatic = false } = {}) {
+    if (priceUpdatePromise) return priceUpdatePromise;
+    priceUpdatePromise = Promise.allSettled([updateCurrentExchangeRate(), fetchAllStockPrices({ automatic })]);
+    try {
+        return await priceUpdatePromise;
+    } finally {
+        priceUpdatePromise = null;
+        renderAll();
+    }
+}
+
+// Fetch prices in small batches while retaining each last successful quote.
+async function fetchAllStockPrices({ automatic = false } = {}) {
+    if (state.portfolio.length === 0) return { successCount: 0, failCount: 0 };
     const updateBtn = document.getElementById('btnUpdatePrices');
-    const statusEl = document.getElementById('lastPriceUpdateTime');
-    
     if (updateBtn) {
         updateBtn.disabled = true;
-        updateBtn.innerHTML = '<i data-lucide="loader" style="width:14px;height:14px;animation:spin 1s linear infinite;"></i> 조회 중...';
+        updateBtn.innerHTML = '<i data-lucide="loader" style="width:14px;height:14px;animation:spin 1s linear infinite;"></i> 議고쉶 以�...';
     }
-    
-    // 1) Update current exchange rate first so UI is fresh
-    await updateCurrentExchangeRate();
-    
-    // Deduplicate tickers
-    const tickerMap = new Map(); // ticker -> currency
+
+    const tickerMap = new Map();
     state.portfolio.forEach(stock => {
-        if (!tickerMap.has(stock.ticker)) {
-            tickerMap.set(stock.ticker, stock.currency);
-        }
+        const key = core.makeStockKey(stock.ticker, stock.currency);
+        if (!tickerMap.has(key)) tickerMap.set(key, { ticker: stock.ticker, currency: stock.currency });
     });
-    
     let successCount = 0;
     let failCount = 0;
-    const totalTickers = tickerMap.size;
-    let currentIdx = 0;
-    
-    // Fetch sequentially to avoid rate-limiting from public proxies
-    for (const [ticker, currency] of tickerMap.entries()) {
-        currentIdx++;
+    const startedAt = new Date().toISOString();
+    const entries = Array.from(tickerMap.entries());
+    let completed = 0;
+    try {
+        for (let offset = 0; offset < entries.length; offset += 2) {
+            const batch = entries.slice(offset, offset + 2);
+            const results = await Promise.allSettled(batch.map(([, item]) => fetchStockPrice(item.ticker, item.currency)));
+            results.forEach((result, index) => {
+                const [key, item] = batch[index];
+                completed++;
+                if (result.status === 'fulfilled' && result.value) {
+                    state.stockPrices[key] = { ...result.value, lastAttemptAt: startedAt, lastError: null };
+                    successCount++;
+                } else {
+                    state.stockPrices[key] = {
+                        ...(state.stockPrices[key] || {}),
+                        currency: item.currency,
+                        lastAttemptAt: startedAt,
+                        lastError: result.reason?.message || '議고쉶 �ㅽ뙣'
+                    };
+                    failCount++;
+                }
+            });
+            if (updateBtn) updateBtn.textContent = `議고쉶 以� (${completed}/${entries.length})...`;
+            saveState({ sync: false });
+        }
+        const finishedAt = new Date().toISOString();
+        state.priceUpdateStatus = {
+            lastAttemptAt: finishedAt,
+            lastSuccessAt: successCount > 0 ? finishedAt : (state.priceUpdateStatus?.lastSuccessAt || state.lastPriceUpdate || null),
+            successCount,
+            failCount
+        };
+        if (successCount > 0) state.lastPriceUpdate = finishedAt;
+        saveState({ sync: false });
+        if (!automatic) {
+            if (failCount > 0 && successCount > 0) showToast(`${successCount}媛� �깃났, ${failCount}媛� �ㅽ뙣. 留덉�留� �뺤긽 媛�寃⑹� 蹂댁〈�덉뒿�덈떎.`, 'warning');
+            else if (failCount > 0) showToast('紐⑤뱺 �꾩옱媛� 議고쉶�� �ㅽ뙣�덉뒿�덈떎. 留덉�留� �뺤긽 媛�寃⑹� 蹂댁〈�덉뒿�덈떎.', 'danger');
+            else showToast(`${successCount}媛� 醫낅ぉ �꾩옱媛�媛� �낅뜲�댄듃�섏뿀�듬땲��.`, 'success');
+        }
+        return { successCount, failCount };
+    } finally {
         if (updateBtn) {
-            updateBtn.innerHTML = `<i class="loader-spinner" style="display:inline-block; width:12px; height:12px; border:2px solid var(--text-primary); border-top-color:transparent; border-radius:50%; animation:spin 1s linear infinite; margin-right:4px; vertical-align:middle;"></i> 조회 중 (${currentIdx}/${totalTickers})...`;
+            updateBtn.disabled = false;
+            updateBtn.innerHTML = '<i data-lucide="refresh-cw" style="width:14px;height:14px;"></i> �꾩옱媛� �낅뜲�댄듃';
+            if (window.lucide) lucide.createIcons();
         }
-
-        const result = await fetchStockPrice(ticker, currency);
-        if (result) {
-            state.stockPrices[ticker] = {
-                price: result.price,
-                currency: result.currency,
-                lastUpdated: new Date().toISOString()
-            };
-            successCount++;
-        } else {
-            failCount++;
-        }
-        // 1500ms throttle delay between requests to avoid rate-limiting from public proxies
-        await new Promise(resolve => setTimeout(resolve, 1500));
-    }
-    
-    // Update timestamp
-    state.lastPriceUpdate = new Date().toISOString();
-    saveState();
-    
-    // Re-render with new prices
-    renderAll();
-    
-    // Update UI
-    if (updateBtn) {
-        updateBtn.disabled = false;
-        updateBtn.innerHTML = '<i data-lucide="refresh-cw" style="width:14px;height:14px;"></i> 현재가 업데이트';
-        lucide.createIcons();
-    }
-    
-    updatePriceTimestamp();
-    
-    if (failCount > 0 && successCount > 0) {
-        showToast(`${successCount}개 종목 현재가 조회 완료, ${failCount}개 실패`, 'warning');
-    } else if (failCount > 0 && successCount === 0) {
-        showToast('현재가 조회에 실패했습니다. 네트워크를 확인해 주세요.', 'danger');
-    } else {
-        showToast(`${successCount}개 종목 현재가가 업데이트되었습니다.`, 'success');
+        updatePriceTimestamp();
     }
 }
 
-// Get current price for a stock (falls back to avgPrice)
+function getStockPriceData(stock) {
+    const key = core.makeStockKey(stock.ticker, stock.currency);
+    const direct = state.stockPrices[key];
+    if (direct) return direct;
+    const legacy = state.stockPrices[stock.ticker];
+    return legacy && (!legacy.currency || legacy.currency === stock.currency) ? legacy : null;
+}
+
+// Cost basis is used only as an explicit fallback for calculations that require a number.
 function getStockCurrentPrice(stock) {
-    const priceData = state.stockPrices[stock.ticker];
+    const priceData = getStockPriceData(stock);
     if (priceData && priceData.price > 0) {
         return priceData.price;
     }
@@ -358,7 +503,24 @@ function getStockCurrentPrice(stock) {
 
 // Check if we have a live price for a stock
 function hasLivePrice(stock) {
-    return !!(state.stockPrices[stock.ticker]?.price);
+    const priceData = getStockPriceData(stock);
+    const freshness = core.getPriceFreshness(priceData);
+    return freshness.available && !freshness.stale;
+}
+
+function hasAnyPrice(stock) {
+    return core.getPriceFreshness(getStockPriceData(stock)).available;
+}
+
+function formatPriceQuoteMeta(stock) {
+    const entry = getStockPriceData(stock);
+    if (!entry || !core.isPositiveNumber(entry.price)) return entry?.lastError ? '<small class="quote-status failed">議고쉶 �ㅽ뙣</small>' : '';
+    const freshness = core.getPriceFreshness(entry);
+    const timestamp = entry.quoteTimestamp || entry.fetchedAt || entry.lastUpdated;
+    const timeText = timestamp ? new Date(timestamp).toLocaleString('ko-KR', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '�쒓컖 誘몄젣怨�';
+    const label = freshness.stale ? '�ㅻ옒�� 留덉�留� 媛�寃�' : '留덉�留� �뺤긽 媛�寃�';
+    const recentFailure = entry.lastError ? ' 쨌 理쒓렐 議고쉶 �ㅽ뙣' : '';
+    return `<small class="quote-status ${freshness.stale ? 'stale' : 'fresh'}">${label} 쨌 �쒖꽭 ${timeText}${recentFailure}</small>`;
 }
 
 // Update the price timestamp display
@@ -366,16 +528,21 @@ function updatePriceTimestamp() {
     const el = document.getElementById('lastPriceUpdateTime');
     if (!el) return;
     
-    if (state.lastPriceUpdate) {
-        const d = new Date(state.lastPriceUpdate);
+    const priceStatus = state.priceUpdateStatus || {};
+    if (priceStatus.lastAttemptAt || priceStatus.lastSuccessAt) {
+        const d = new Date(priceStatus.lastAttemptAt || priceStatus.lastSuccessAt);
         const timeStr = d.toLocaleString('ko-KR', { 
             month: 'short', day: 'numeric', 
             hour: '2-digit', minute: '2-digit' 
         });
         
-        const rateStr = state.currentExchangeRate ? ` (환율: ₩${state.currentExchangeRate.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})})` : '';
-        
-        el.textContent = `마지막 업데이트: ${timeStr}${rateStr}`;
+        const counts = Number.isFinite(priceStatus.successCount) ? ` 쨌 �쒖꽭 ${priceStatus.successCount}�깃났/${priceStatus.failCount || 0}�ㅽ뙣` : '';
+        const fxMeta = state.currentExchangeRateMeta || {};
+        const rateStr = state.currentExchangeRate
+            ? ` 쨌 �섏쑉 ��${state.currentExchangeRate.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}${fxMeta.asOf ? ` (湲곗� ${new Date(fxMeta.asOf).toLocaleDateString('ko-KR')})` : ''}`
+            : ' 쨌 �섏쑉 誘몄“��';
+        const fxError = fxMeta.status === 'error' ? ' 쨌 �섏쑉 理쒓렐 議고쉶 �ㅽ뙣(留덉�留� �뺤긽媛� �좎�)' : '';
+        el.textContent = `留덉�留� �쒕룄: ${timeStr}${counts}${rateStr}${fxError}`;
     } else {
         el.textContent = '';
     }
@@ -427,15 +594,15 @@ function setupEventListeners() {
     // Modals Open Buttons
     document.getElementById('btnAddAccount').addEventListener('click', () => {
         editingAccountId = null;
-        document.querySelector('#modalAccount .modal-title').textContent = '새 계좌 등록';
-        document.querySelector('#formAccount button[type="submit"]').textContent = '등록하기';
+        document.querySelector('#modalAccount .modal-title').textContent = '�� 怨꾩쥖 �깅줉';
+        document.querySelector('#formAccount button[type="submit"]').textContent = '�깅줉�섍린';
         document.getElementById('formAccount').reset();
         openModal('modalAccount');
     });
     document.getElementById('btnAddPortfolio').addEventListener('click', () => {
         editingPortfolioId = null;
-        document.querySelector('#modalPortfolio .modal-title').textContent = '보유 주식 등록';
-        document.querySelector('#formPortfolio button[type="submit"]').textContent = '등록하기';
+        document.querySelector('#modalPortfolio .modal-title').textContent = '蹂댁쑀 二쇱떇 �깅줉';
+        document.querySelector('#formPortfolio button[type="submit"]').textContent = '�깅줉�섍린';
         document.getElementById('formPortfolio').reset();
         document.querySelectorAll('.months-selection-grid input[type="checkbox"]').forEach(cb => cb.checked = false);
         populateAccountSelect('portfolioAccount');
@@ -443,9 +610,14 @@ function setupEventListeners() {
     });
     document.getElementById('btnAddDividend').addEventListener('click', () => {
         editingDividendId = null;
-        document.querySelector('#modalDividend .modal-title').textContent = '배당 수령 기록';
-        document.querySelector('#formDividend button[type="submit"]').textContent = '등록하기';
+        document.querySelector('#modalDividend .modal-title').textContent = '諛곕떦 �섎졊 湲곕줉';
+        document.querySelector('#formDividend button[type="submit"]').textContent = '�깅줉�섍린';
         document.getElementById('formDividend').reset();
+        const rateInput = document.getElementById('dividendExchangeRate');
+        rateInput.dataset.manualVersion = '0';
+        rateInput.dataset.rateSource = '';
+        rateInput.dataset.rateDate = '';
+        rateInput.dataset.requestedDate = '';
         document.getElementById('exchangeRateFormGroup').style.display = 'none';
         
         populateAccountSelect('dividendAccountSelect');
@@ -454,11 +626,11 @@ function setupEventListeners() {
         
         openModal('modalDividend');
         // Set default date to today
-        document.getElementById('dividendDate').value = new Date().toISOString().split('T')[0];
+        document.getElementById('dividendDate').value = core.localDateString();
     });
 
     // -------------------------------------------------------
-    // Dividend Modal – Exchange Rate Auto-Fetch Logic
+    // Dividend Modal �� Exchange Rate Auto-Fetch Logic
     // -------------------------------------------------------
     const dateInput    = document.getElementById('dividendDate');
     const stockSelect  = document.getElementById('dividendStock');
@@ -466,40 +638,72 @@ function setupEventListeners() {
     const rateInput    = document.getElementById('dividendExchangeRate');
     const rateStatus   = document.getElementById('exchangeRateStatus');
 
+    rateInput.addEventListener('input', () => {
+        if (rateInput.dataset.programmatic === 'true') return;
+        rateInput.dataset.manualVersion = String((Number(rateInput.dataset.manualVersion) || 0) + 1);
+        rateInput.dataset.rateSource = 'manual';
+        rateInput.dataset.rateDate = dateInput.value;
+        if (rateStatus) {
+            rateStatus.style.color = 'var(--text-secondary)';
+            rateStatus.textContent = '�섎룞 �낅젰媛믪쓣 �ъ슜�⑸땲��.';
+        }
+    });
+
+    const setRateProgrammatically = (value, metadata = {}) => {
+        rateInput.dataset.programmatic = 'true';
+        rateInput.value = value;
+        rateInput.dataset.rateSource = metadata.source || '';
+        rateInput.dataset.rateDate = metadata.rateDate || '';
+        rateInput.dataset.requestedDate = metadata.requestedDate || '';
+        queueMicrotask(() => { rateInput.dataset.programmatic = 'false'; });
+    };
+
     // Shared helper: fetch rate for a given date and populate the input
     async function fetchAndSetRate(dateStr, { showStatus = true } = {}) {
         if (!dateStr || currencyField.value !== 'USD') return;
 
+        const requestId = ++historicalRateRequestSequence;
+        const manualVersion = Number(rateInput.dataset.manualVersion) || 0;
+
         if (showStatus) {
             rateStatus.style.color = 'var(--text-secondary)';
-            rateStatus.textContent = '⏳ 환율 조회 중...';
+            rateStatus.textContent = '�� �섏쑉 議고쉶 以�...';
         }
 
-        // Show fallback immediately so the field is never blank
-        rateInput.value = (state.currentExchangeRate || FALLBACK_EXCHANGE_RATE).toFixed(2);
-
-        // Clear cache entry so we always re-fetch on manual refresh
-        // (but keep cache for auto fills on first open)
         try {
-            const rate = await getHistoricalExchangeRate(dateStr);
-            if (rate) {
-                rateInput.value = rate.toFixed(2);
+            const result = await getHistoricalExchangeRate(dateStr);
+            const shouldApply = core.shouldApplyHistoricalRateResponse({
+                requestId,
+                latestRequestId: historicalRateRequestSequence,
+                requestedDate: dateStr,
+                currentDate: dateInput.value,
+                currentCurrency: currencyField.value,
+                manualVersionBefore: manualVersion,
+                manualVersionNow: Number(rateInput.dataset.manualVersion) || 0
+            });
+            if (!shouldApply) return;
+            if (result.ok) {
+                setRateProgrammatically(result.rate.toFixed(2), result);
                 if (showStatus) {
                     rateStatus.style.color = '#10b981';
-                    rateStatus.textContent = `✔ ${dateStr} 기준 환율 조회 완료: ${rate.toFixed(2)}원`;
+                    const basisText = result.rateDate === result.requestedDate
+                        ? `${result.rateDate} 湲곗�`
+                        : `${result.requestedDate} �붿껌 쨌 �ㅼ젣 湲곗� ${result.rateDate}`;
+                    rateStatus.textContent = `�� ${basisText}: ${result.rate.toFixed(2)}�� (${result.source})`;
                 }
             } else {
                 if (showStatus) {
                     rateStatus.style.color = 'var(--danger)';
-                    rateStatus.textContent = '⚠ 환율 조회 실패 – 현재 환율이 적용되었습니다. 수동으로 수정 가능합니다.';
-                    showToast('해당 날짜의 환율을 조회하지 못했습니다. 현재 환율 기준이 적용되었습니다.', 'warning');
+                    const currentHint = result.fallbackRate ? ` 留덉�留� �됯� �섏쑉 ${result.fallbackRate.toFixed(2)}�먯� �먮룞 �곸슜�섏� �딆뒿�덈떎.` : '';
+                    rateStatus.textContent = `�� ${dateStr} 怨쇨굅 �섏쑉 議고쉶 �ㅽ뙣.${currentHint} �섎룞 �낅젰�� �꾩슂�⑸땲��.`;
+                    showToast('怨쇨굅 �섏쑉�� �뺤젙�섏� 紐삵뻽�듬땲��. 湲곗〈 �섎룞媛믪쓣 蹂댁〈�덉뒿�덈떎.', 'warning');
                 }
             }
         } catch (err) {
             if (showStatus) {
                 rateStatus.style.color = 'var(--danger)';
-                rateStatus.textContent = '⚠ 네트워크 오류 – 수동으로 환율을 입력해 주세요.';
-                showToast('환율 API 연결에 실패했습니다. 직접 입력해 주세요.', 'danger');
+                rateStatus.textContent = '�� �ㅽ듃�뚰겕 �ㅻ쪟 �� �섎룞�쇰줈 �섏쑉�� �낅젰�� 二쇱꽭��.';
+                showToast('�섏쑉 API �곌껐�� �ㅽ뙣�덉뒿�덈떎. 吏곸젒 �낅젰�� 二쇱꽭��.', 'danger');
             }
         }
     }
@@ -515,12 +719,12 @@ function setupEventListeners() {
             await fetchAndSetRate(dateInput.value);
         } else {
             document.getElementById('exchangeRateFormGroup').style.display = 'none';
-            rateInput.value = 1;
+            setRateProgrammatically('1', { source: 'not-applicable', rateDate: dateInput.value, requestedDate: dateInput.value });
             if (rateStatus) rateStatus.textContent = '';
         }
     }
 
-    // Trigger rate lookup when currency select changes (for "기타" stock manual selection)
+    // Trigger rate lookup when currency select changes (for "湲고�" stock manual selection)
     currencyField.addEventListener('change', () => {
         handleCurrencyChange(currencyField.value);
     });
@@ -547,7 +751,7 @@ function setupEventListeners() {
     // Manual refresh button
     document.getElementById('btnRefreshExchangeRate').addEventListener('click', async () => {
         if (!dateInput.value) {
-            showToast('날짜를 먼저 선택해 주세요.', 'warning');
+            showToast('�좎쭨瑜� 癒쇱� �좏깮�� 二쇱꽭��.', 'warning');
             return;
         }
         // Force re-fetch by clearing cache for this date
@@ -571,7 +775,7 @@ function setupEventListeners() {
         // Reset stock related fields
         currencyField.value = 'KRW';
         document.getElementById('exchangeRateFormGroup').style.display = 'none';
-        rateInput.value = 1;
+        setRateProgrammatically('1', { source: 'not-applicable', rateDate: dateInput.value, requestedDate: dateInput.value });
         if (rateStatus) rateStatus.textContent = '';
     });
 
@@ -621,9 +825,7 @@ function setupEventListeners() {
 
     // Stock Price Update Button
     document.getElementById('btnUpdatePrices').addEventListener('click', async () => {
-        await updateCurrentExchangeRate();
-        await fetchAllStockPrices();
-        updatePriceTimestamp(); // Force UI update for the new exchange rate string
+        await refreshMarketData();
     });
 
     // Form Submissions
@@ -678,7 +880,7 @@ function setupEventListeners() {
     document.getElementById('btnExecuteReset').addEventListener('click', () => {
         const pin = document.getElementById('resetPinInput').value;
         if (pin !== '0000') {
-            showToast("비밀번호가 일치하지 않습니다. (기본값: 0000)", "danger");
+            showToast("鍮꾨�踰덊샇媛� �쇱튂�섏� �딆뒿�덈떎. (湲곕낯媛�: 0000)", "danger");
             return;
         }
         
@@ -687,10 +889,11 @@ function setupEventListeners() {
         
         // 2. Perform deletion and reload mock data
         localStorage.removeItem('dividend_tracker_state');
+        storageWriteBlocked = false;
         loadMockData();
         closeModal('modalReset');
         renderAll();
-        showToast("데이터가 백업 및 안전하게 초기화되었습니다.", "success");
+        showToast("�곗씠�곌� 諛깆뾽 諛� �덉쟾�섍쾶 珥덇린�붾릺�덉뒿�덈떎.", "success");
     });
 
     // JSON Export / Import
@@ -707,16 +910,17 @@ function setupEventListeners() {
                     try {
                         const importedState = JSON.parse(event.target.result);
                         if (importedState.accounts && importedState.portfolio && importedState.dividendLogs) {
-                            state = { ...state, ...importedState };
-                            if (!state.shareHistory) state.shareHistory = [];
-                            saveState();
+                            const recoveredState = core.migrateState(importedState, state);
+                            storageWriteBlocked = false;
+                            state = recoveredState;
+                            if (!saveState()) throw new Error('蹂듭썝 �곗씠�� ���� �ㅽ뙣');
                             renderAll();
-                            showToast("데이터 백업이 성공적으로 복원되었습니다.", "success");
+                            showToast("�곗씠�� 諛깆뾽�� �깃났�곸쑝濡� 蹂듭썝�섏뿀�듬땲��.", "success");
                         } else {
-                            showToast("올바른 백업 파일 형식이 아닙니다.", "danger");
+                            showToast("�щ컮瑜� 諛깆뾽 �뚯씪 �뺤떇�� �꾨떃�덈떎.", "danger");
                         }
                     } catch (err) {
-                        showToast("파일을 읽는 중 오류가 발생했습니다.", "danger");
+                        showToast("�뚯씪�� �쎈뒗 以� �ㅻ쪟媛� 諛쒖깮�덉뒿�덈떎.", "danger");
                     }
                 };
                 reader.readAsText(file);
@@ -760,11 +964,11 @@ function setupEventListeners() {
     document.getElementById('reinvestStockSelect').addEventListener('change', handleReinvestStockChange);
 
     // -------------------------------------------------------
-    // Buy More (추가 구매) Modal Logic
+    // Buy More (異붽� 援щℓ) Modal Logic
     // -------------------------------------------------------
     document.getElementById('btnBuyMore').addEventListener('click', () => {
         if (state.portfolio.length === 0) {
-            showToast('등록된 종목이 없습니다. 먼저 보유 주식을 등록해 주세요.', 'warning');
+            showToast('�깅줉�� 醫낅ぉ�� �놁뒿�덈떎. 癒쇱� 蹂댁쑀 二쇱떇�� �깅줉�� 二쇱꽭��.', 'warning');
             return;
         }
         document.getElementById('formBuyMore').reset();
@@ -775,7 +979,7 @@ function setupEventListeners() {
         populatePortfolioSelect('buyMoreStock');
         document.getElementById('buyMoreStock').disabled = true;
         
-        document.getElementById('buyMoreDate').value = new Date().toISOString().split('T')[0];
+        document.getElementById('buyMoreDate').value = core.localDateString();
         openModal('modalBuyMore');
     });
 
@@ -797,12 +1001,12 @@ function setupEventListeners() {
 
     document.getElementById('buyMoreStock').addEventListener('change', updateBuyMoreInfo);
 
-    // Cross-calculation: shares ↔ per-share price ↔ total price
+    // Cross-calculation: shares �� per-share price �� total price
     const buySharesInput = document.getElementById('buyMoreShares');
     const buyPriceInput  = document.getElementById('buyMorePrice');
     const buyTotalInput  = document.getElementById('buyMoreTotalPrice');
 
-    // When quantity changes → recalculate total from per-share (if per-share is filled)
+    // When quantity changes �� recalculate total from per-share (if per-share is filled)
     buySharesInput.addEventListener('input', () => {
         const shares = parseFloat(buySharesInput.value);
         const price  = parseFloat(buyPriceInput.value);
@@ -812,7 +1016,7 @@ function setupEventListeners() {
         updateBuyMorePreview();
     });
 
-    // When per-share price changes → recalculate total
+    // When per-share price changes �� recalculate total
     buyPriceInput.addEventListener('input', () => {
         const shares = parseFloat(buySharesInput.value);
         const price  = parseFloat(buyPriceInput.value);
@@ -822,7 +1026,7 @@ function setupEventListeners() {
         updateBuyMorePreview();
     });
 
-    // When total price changes → back-calculate per-share price
+    // When total price changes �� back-calculate per-share price
     buyTotalInput.addEventListener('input', () => {
         const shares = parseFloat(buySharesInput.value);
         const total  = parseFloat(buyTotalInput.value);
@@ -904,9 +1108,9 @@ function toggleTheme() {
     // Update theme toggle button text/icon
     const themeBtn = document.getElementById('themeToggleBtn');
     if (nextTheme === 'light') {
-        themeBtn.innerHTML = '<i data-lucide="moon"></i> 다크 모드';
+        themeBtn.innerHTML = '<i data-lucide="moon"></i> �ㅽ겕 紐⑤뱶';
     } else {
-        themeBtn.innerHTML = '<i data-lucide="sun"></i> 라이트 모드';
+        themeBtn.innerHTML = '<i data-lucide="sun"></i> �쇱씠�� 紐⑤뱶';
     }
     
     saveThemePreference(nextTheme);
@@ -939,8 +1143,8 @@ function openEditAccount(id) {
     document.getElementById('accountType').value = acc.type;
     document.getElementById('accountNumber').value = acc.accountNumber || '';
     
-    document.querySelector('#modalAccount .modal-title').textContent = '계좌 정보 수정';
-    document.querySelector('#formAccount button[type="submit"]').textContent = '수정하기';
+    document.querySelector('#modalAccount .modal-title').textContent = '怨꾩쥖 �뺣낫 �섏젙';
+    document.querySelector('#formAccount button[type="submit"]').textContent = '�섏젙�섍린';
     
     openModal('modalAccount');
 }
@@ -969,8 +1173,8 @@ function openEditPortfolio(id) {
         if (checkbox) checkbox.checked = true;
     });
     
-    document.querySelector('#modalPortfolio .modal-title').textContent = '보유 주식 정보 수정';
-    document.querySelector('#formPortfolio button[type="submit"]').textContent = '수정하기';
+    document.querySelector('#modalPortfolio .modal-title').textContent = '蹂댁쑀 二쇱떇 �뺣낫 �섏젙';
+    document.querySelector('#formPortfolio button[type="submit"]').textContent = '�섏젙�섍린';
     
     openModal('modalPortfolio');
 }
@@ -1012,14 +1216,24 @@ function openEditDividend(id) {
     
     if (log.currency === 'USD') {
         document.getElementById('exchangeRateFormGroup').style.display = 'flex';
-        document.getElementById('dividendExchangeRate').value = log.exchangeRate;
+        const rateInput = document.getElementById('dividendExchangeRate');
+        rateInput.value = log.exchangeRate ?? '';
+        rateInput.dataset.manualVersion = '0';
+        rateInput.dataset.rateSource = log.exchangeRateSource || 'legacy-confirmed';
+        rateInput.dataset.rateDate = log.exchangeRateDate || '';
+        rateInput.dataset.requestedDate = log.exchangeRateRequestedDate || log.date || '';
     } else {
         document.getElementById('exchangeRateFormGroup').style.display = 'none';
-        document.getElementById('dividendExchangeRate').value = 1;
+        const rateInput = document.getElementById('dividendExchangeRate');
+        rateInput.value = 1;
+        rateInput.dataset.manualVersion = '0';
+        rateInput.dataset.rateSource = 'not-applicable';
+        rateInput.dataset.rateDate = '';
+        rateInput.dataset.requestedDate = log.date || '';
     }
     
-    document.querySelector('#modalDividend .modal-title').textContent = '배당 수령 기록 수정';
-    document.querySelector('#formDividend button[type="submit"]').textContent = '수정하기';
+    document.querySelector('#modalDividend .modal-title').textContent = '諛곕떦 �섎졊 湲곕줉 �섏젙';
+    document.querySelector('#formDividend button[type="submit"]').textContent = '�섏젙�섍린';
     
     openModal('modalDividend');
 }
@@ -1030,7 +1244,7 @@ function populateAccountSelect(selectId) {
     
     // If it's the dividend account select, add a placeholder first
     if (selectId === 'dividendAccountSelect') {
-        select.innerHTML = '<option value="">계좌를 먼저 선택하세요</option>';
+        select.innerHTML = '<option value="">怨꾩쥖瑜� 癒쇱� �좏깮�섏꽭��</option>';
     } else {
         select.innerHTML = '';
     }
@@ -1048,7 +1262,7 @@ function populatePortfolioSelect(selectId, accountId = null) {
     const select = document.getElementById(selectId);
     if (!select) return;
     
-    select.innerHTML = '<option value="">-- 종목 선택 --</option>';
+    select.innerHTML = '<option value="">-- 醫낅ぉ �좏깮 --</option>';
     
     let filteredPortfolio = state.portfolio;
     if (accountId) {
@@ -1062,17 +1276,17 @@ function populatePortfolioSelect(selectId, accountId = null) {
             option.textContent = `${p.name} (${p.ticker})`;
         } else {
             const acc = state.accounts.find(a => a.id === p.accountId);
-            const accName = acc ? acc.name : '미지정 계좌';
+            const accName = acc ? acc.name : '誘몄��� 怨꾩쥖';
             option.textContent = `[${accName}] ${p.name} (${p.ticker})`;
         }
         select.appendChild(option);
     });
     
-    // Add virtual "기타" stock if account is specified
+    // Add virtual "湲고�" stock if account is specified
     if (accountId) {
         const option = document.createElement('option');
         option.value = `etc-${accountId}`;
-        option.textContent = `기타 (ETC)`;
+        option.textContent = `湲고� (ETC)`;
         select.appendChild(option);
     }
 }
@@ -1087,7 +1301,7 @@ function populateFilterSelects() {
     const selectedStock = filterStock.value;
     
     // 1. Populate Account Filter for Dividend Logs
-    filterAccount.innerHTML = '<option value="">전체 계좌</option>';
+    filterAccount.innerHTML = '<option value="">�꾩껜 怨꾩쥖</option>';
     state.accounts.forEach(acc => {
         const option = document.createElement('option');
         option.value = acc.id;
@@ -1103,7 +1317,7 @@ function populateFilterSelects() {
     const filterPortfolioAccount = document.getElementById('filterPortfolioAccount');
     if (filterPortfolioAccount) {
         const selectedPortAccount = filterPortfolioAccount.value;
-        filterPortfolioAccount.innerHTML = '<option value="all">전체 계좌 보기</option>';
+        filterPortfolioAccount.innerHTML = '<option value="all">�꾩껜 怨꾩쥖 蹂닿린</option>';
         state.accounts.forEach(acc => {
             const option = document.createElement('option');
             option.value = acc.id;
@@ -1117,7 +1331,7 @@ function populateFilterSelects() {
     }
     
     // 2. Populate Stock Filter based on selected Account
-    filterStock.innerHTML = '<option value="">전체 종목</option>';
+    filterStock.innerHTML = '<option value="">�꾩껜 醫낅ぉ</option>';
     
     let filteredPortfolio = state.portfolio;
     if (selectedAccount) {
@@ -1129,7 +1343,7 @@ function populateFilterSelects() {
         option.value = stock.id;
         
         const acc = state.accounts.find(a => a.id === stock.accountId);
-        const accName = acc ? acc.name : '미지정 계좌';
+        const accName = acc ? acc.name : '誘몄��� 怨꾩쥖';
         
         option.textContent = `[${accName}] ${stock.name} (${stock.ticker})`;
         if (stock.id === selectedStock) {
@@ -1138,13 +1352,13 @@ function populateFilterSelects() {
         filterStock.appendChild(option);
     });
 
-    // Add virtual "기타" stock options to filter
+    // Add virtual "湲고�" stock options to filter
     if (selectedAccount) {
         const acc = state.accounts.find(a => a.id === selectedAccount);
         if (acc) {
             const option = document.createElement('option');
             option.value = `etc-${selectedAccount}`;
-            option.textContent = `[${acc.name}] 기타 (ETC)`;
+            option.textContent = `[${acc.name}] 湲고� (ETC)`;
             if (option.value === selectedStock) option.selected = true;
             filterStock.appendChild(option);
         }
@@ -1152,13 +1366,13 @@ function populateFilterSelects() {
         state.accounts.forEach(acc => {
             const option = document.createElement('option');
             option.value = `etc-${acc.id}`;
-            option.textContent = `[${acc.name}] 기타 (ETC)`;
+            option.textContent = `[${acc.name}] 湲고� (ETC)`;
             if (option.value === selectedStock) option.selected = true;
             filterStock.appendChild(option);
         });
     }
     
-    // If the selected stock is not in the filtered portfolio and not a virtual "기타" option, reset the stock filter value
+    // If the selected stock is not in the filtered portfolio and not a virtual "湲고�" option, reset the stock filter value
     const isVirtualSelected = selectedStock && selectedStock.startsWith('etc-');
     if (selectedStock && !isVirtualSelected && !filteredPortfolio.some(p => p.id === selectedStock)) {
         filterStock.value = "";
@@ -1205,11 +1419,15 @@ function formatCurrency(val, currency = state.activeCurrency) {
 
 // Converters
 function convertUSDToKRW(usdVal) {
-    return usdVal * state.currentExchangeRate;
+    return core.isPositiveNumber(state.currentExchangeRate) ? usdVal * state.currentExchangeRate : null;
 }
 
 function convertKRWToUSD(krwVal) {
-    return krwVal / state.currentExchangeRate;
+    return core.isPositiveNumber(state.currentExchangeRate) ? krwVal / state.currentExchangeRate : null;
+}
+
+function getDividendRecordValue(log, basis = 'gross') {
+    return core.getDividendValue(log, state.activeCurrency, state.currentExchangeRate, basis);
 }
 
 // Convert mixed currencies to display active currency value
@@ -1235,7 +1453,7 @@ function handleAccountSubmit(e) {
             acc.name = name;
             acc.type = type;
             acc.accountNumber = accountNumber;
-            showToast("계좌 정보가 수정되었습니다.", "success");
+            showToast("怨꾩쥖 �뺣낫媛� �섏젙�섏뿀�듬땲��.", "success");
         }
         editingAccountId = null;
     } else {
@@ -1246,7 +1464,7 @@ function handleAccountSubmit(e) {
             accountNumber
         };
         state.accounts.push(newAccount);
-        showToast("계좌가 성공적으로 추가되었습니다.", "success");
+        showToast("怨꾩쥖媛� �깃났�곸쑝濡� 異붽��섏뿀�듬땲��.", "success");
     }
     saveState();
     closeModal('modalAccount');
@@ -1272,7 +1490,7 @@ function handlePortfolioSubmit(e) {
     });
 
     if (exMonths.length === 0) {
-        showToast("배당 지급 월을 최소 하나 이상 선택해 주세요.", "warning");
+        showToast("諛곕떦 吏�湲� �붿쓣 理쒖냼 �섎굹 �댁긽 �좏깮�� 二쇱꽭��.", "warning");
         return;
     }
 
@@ -1292,7 +1510,7 @@ function handlePortfolioSubmit(e) {
             // Sync with latest share history
             syncLatestShareHistory(stock.id, shares);
             
-            showToast("보유 종목 정보가 수정되었습니다.", "success");
+            showToast("蹂댁쑀 醫낅ぉ �뺣낫媛� �섏젙�섏뿀�듬땲��.", "success");
         }
         editingPortfolioId = null;
     } else {
@@ -1314,11 +1532,11 @@ function handlePortfolioSubmit(e) {
         state.shareHistory.push({
             id: 'sh-' + Date.now(),
             portfolioId: newStock.id,
-            date: new Date().toISOString().split('T')[0],
+            date: core.localDateString(),
             shares: shares
         });
         
-        showToast("보유 종목이 추가되었습니다.", "success");
+        showToast("蹂댁쑀 醫낅ぉ�� 異붽��섏뿀�듬땲��.", "success");
     }
     saveState();
     closeModal('modalPortfolio');
@@ -1336,7 +1554,7 @@ function syncLatestShareHistory(portfolioId, newShares) {
         state.shareHistory.push({
             id: 'sh-' + Date.now(),
             portfolioId: portfolioId,
-            date: new Date().toISOString().split('T')[0],
+            date: core.localDateString(),
             shares: newShares
         });
     } else {
@@ -1347,7 +1565,7 @@ function syncLatestShareHistory(portfolioId, newShares) {
 }
 
 // -------------------------------------------------------
-// Additional Purchase (추가 구매) Helpers
+// Additional Purchase (異붽� 援щℓ) Helpers
 // -------------------------------------------------------
 function updateBuyMoreInfo() {
     const select = document.getElementById('buyMoreStock');
@@ -1359,8 +1577,8 @@ function updateBuyMoreInfo() {
     
     if (stock) {
         document.getElementById('buyMoreCurShares').textContent = 
-            stock.shares.toLocaleString('ko-KR', { maximumFractionDigits: 4 }) + '주';
-        const currency = stock.currency === 'USD' ? '$' : '₩';
+            stock.shares.toLocaleString('ko-KR', { maximumFractionDigits: 4 }) + '二�';
+        const currency = stock.currency === 'USD' ? '$' : '��';
         document.getElementById('buyMoreCurAvg').textContent = 
             currency + stock.avgPrice.toLocaleString('ko-KR', { maximumFractionDigits: 2 });
         infoBox.style.display = 'block';
@@ -1396,9 +1614,9 @@ function updateBuyMorePreview() {
     const totalShares = stock.shares + addShares;
     const newAvg = ((stock.shares * stock.avgPrice) + (addShares * buyPrice)) / totalShares;
     
-    const currency = stock.currency === 'USD' ? '$' : '₩';
+    const currency = stock.currency === 'USD' ? '$' : '��';
     document.getElementById('buyMoreNewShares').textContent =
-        totalShares.toLocaleString('ko-KR', { maximumFractionDigits: 4 }) + '주';
+        totalShares.toLocaleString('ko-KR', { maximumFractionDigits: 4 }) + '二�';
     document.getElementById('buyMoreNewAvg').textContent =
         currency + newAvg.toLocaleString('ko-KR', { maximumFractionDigits: 2 });
     
@@ -1413,7 +1631,7 @@ function handleBuyMoreSubmit(e) {
     const stock   = state.portfolio.find(p => p.id === stockId);
     
     if (!stock) {
-        showToast('종목을 선택해 주세요.', 'warning');
+        showToast('醫낅ぉ�� �좏깮�� 二쇱꽭��.', 'warning');
         return;
     }
     
@@ -1422,7 +1640,7 @@ function handleBuyMoreSubmit(e) {
     const buyDate   = document.getElementById('buyMoreDate').value;
     
     if (!addShares || !buyPrice || !buyDate || addShares <= 0 || buyPrice <= 0) {
-        showToast('수량, 단가, 날짜를 올바르게 입력해 주세요.', 'warning');
+        showToast('�섎웾, �④�, �좎쭨瑜� �щ컮瑜닿쾶 �낅젰�� 二쇱꽭��.', 'warning');
         return;
     }
     
@@ -1450,7 +1668,7 @@ function handleBuyMoreSubmit(e) {
     document.getElementById('buyMoreCurrentInfo').style.display = 'none';
     document.getElementById('buyMorePreview').style.display = 'none';
     
-    showToast(`${stock.name} ${addShares}주 추가 구매 반영 완료! 총 ${stock.shares}주 · 평균단가 ${stock.avgPrice.toFixed(2)}`, 'success');
+    showToast(`${stock.name} ${addShares}二� 異붽� 援щℓ 諛섏쁺 �꾨즺! 珥� ${stock.shares}二� 쨌 �됯퇏�④� ${stock.avgPrice.toFixed(2)}`, 'success');
     renderAll();
 }
 
@@ -1466,20 +1684,41 @@ async function handleDividendSubmit(e) {
     const stock = state.portfolio.find(p => p.id === portfolioId);
     
     if (!stock && !isEtc) {
-        showToast("종목을 선택해 주세요.", "warning");
+        showToast("醫낅ぉ�� �좏깮�� 二쇱꽭��.", "warning");
+        return;
+    }
+    if (!core.isPositiveNumber(amount) || tax < 0 || tax > amount) {
+        showToast('�몄쟾 �섎졊�↔낵 �멸툑�� �щ컮瑜닿쾶 �낅젰�� 二쇱꽭��.', 'warning');
         return;
     }
 
     const currency = document.getElementById('dividendCurrency').value;
     let rate = 1;
+    let rateDate = dateVal;
+    let rateSource = 'not-applicable';
+    let rateRequestedDate = dateVal;
     if (currency === 'USD') {
-        rate = parseFloat(document.getElementById('dividendExchangeRate').value);
-        if (!rate || isNaN(rate)) {
-            rate = await getHistoricalExchangeRate(dateVal);
+        const rateInput = document.getElementById('dividendExchangeRate');
+        rate = parseFloat(rateInput.value);
+        rateDate = rateInput.dataset.rateDate || dateVal;
+        rateSource = rateInput.dataset.rateSource || 'manual';
+        rateRequestedDate = rateInput.dataset.requestedDate || dateVal;
+        if (!core.isPositiveNumber(rate)) {
+            const result = await getHistoricalExchangeRate(dateVal);
+            if (!result.ok) {
+                showToast('怨쇨굅 �섏쑉�� �뺤젙�� �� �놁뒿�덈떎. �곸슜 �섏쑉�� 吏곸젒 �낅젰�� 二쇱꽭��.', 'danger');
+                return;
+            }
+            rate = result.rate;
+            rateDate = result.rateDate;
+            rateSource = result.source;
+            rateRequestedDate = result.requestedDate;
         }
     }
 
     const amountKRW = currency === 'KRW' ? amount : amount * rate;
+    const netAmount = amount - tax;
+    const netAmountKRW = currency === 'KRW' ? netAmount : netAmount * rate;
 
     if (editingDividendId) {
         const log = state.dividendLogs.find(l => l.id === editingDividendId);
@@ -1491,7 +1730,13 @@ async function handleDividendSubmit(e) {
             log.exchangeRate = rate;
             log.amountKRW = amountKRW;
             log.tax = tax;
-            showToast("배당 수령 기록이 수정되었습니다.", "success");
+            log.netAmount = netAmount;
+            log.netAmountKRW = netAmountKRW;
+            log.exchangeRateDate = rateDate;
+            log.exchangeRateRequestedDate = rateRequestedDate;
+            log.exchangeRateSource = rateSource;
+            log.exchangeRateIsFallback = false;
+            showToast("諛곕떦 �섎졊 湲곕줉�� �섏젙�섏뿀�듬땲��.", "success");
         }
         editingDividendId = null;
     } else {
@@ -1503,10 +1748,16 @@ async function handleDividendSubmit(e) {
             currency,
             exchangeRate: rate,
             amountKRW,
-            tax
+            tax,
+            netAmount,
+            netAmountKRW,
+            exchangeRateDate: rateDate,
+            exchangeRateRequestedDate: rateRequestedDate,
+            exchangeRateSource: rateSource,
+            exchangeRateIsFallback: false
         };
         state.dividendLogs.push(newLog);
-        showToast("배당금 수령 기록이 추가되었습니다.", "success");
+        showToast("諛곕떦湲� �섎졊 湲곕줉�� 異붽��섏뿀�듬땲��.", "success");
     }
 
     // Sort logs by date
@@ -1520,7 +1771,7 @@ async function handleDividendSubmit(e) {
 
 // Delete Handlers
 function deleteAccount(id) {
-    if (confirm("이 계좌를 삭제하시겠습니까? 연결된 포트폴리오 및 배당금 수령 기록도 삭제될 수 있습니다.")) {
+    if (confirm("�� 怨꾩쥖瑜� ��젣�섏떆寃좎뒿�덇퉴? �곌껐�� �ы듃�대━�� 諛� 諛곕떦湲� �섎졊 湲곕줉�� ��젣�� �� �덉뒿�덈떎.")) {
         // Find portfolio items tied to this account
         const portIds = state.portfolio.filter(p => p.accountId === id).map(p => p.id);
         // Filter portfolio
@@ -1540,27 +1791,27 @@ function deleteAccount(id) {
         
         saveState();
         renderAll();
-        showToast("계좌가 삭제되었습니다.", "success");
+        showToast("怨꾩쥖媛� ��젣�섏뿀�듬땲��.", "success");
     }
 }
 
 function deletePortfolio(id) {
-    if (confirm("이 보유 종목을 삭제하시겠습니까? 관련된 배당금 수령 기록도 모두 삭제됩니다.")) {
+    if (confirm("�� 蹂댁쑀 醫낅ぉ�� ��젣�섏떆寃좎뒿�덇퉴? 愿��⑤맂 諛곕떦湲� �섎졊 湲곕줉�� 紐⑤몢 ��젣�⑸땲��.")) {
         state.portfolio = state.portfolio.filter(p => p.id !== id);
         state.dividendLogs = state.dividendLogs.filter(log => log.portfolioId !== id);
         state.shareHistory = state.shareHistory.filter(sh => sh.portfolioId !== id);
         saveState();
         renderAll();
-        showToast("종목이 삭제되었습니다.", "success");
+        showToast("醫낅ぉ�� ��젣�섏뿀�듬땲��.", "success");
     }
 }
 
 function deleteDividendLog(id) {
-    if (confirm("이 배당금 수령 기록을 삭제하시겠습니까?")) {
+    if (confirm("�� 諛곕떦湲� �섎졊 湲곕줉�� ��젣�섏떆寃좎뒿�덇퉴?")) {
         state.dividendLogs = state.dividendLogs.filter(log => log.id !== id);
         saveState();
         renderAll();
-        showToast("수령 기록이 삭제되었습니다.", "success");
+        showToast("�섎졊 湲곕줉�� ��젣�섏뿀�듬땲��.", "success");
     }
 }
 
@@ -1569,12 +1820,12 @@ function exportDataJSON() {
     const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(state, null, 2));
     const downloadAnchor = document.createElement('a');
     downloadAnchor.setAttribute("href", dataStr);
-    const dateStamp = new Date().toISOString().split('T')[0];
+    const dateStamp = core.localDateString();
     downloadAnchor.setAttribute("download", `dividend_backup_${dateStamp}.json`);
     document.body.appendChild(downloadAnchor);
     downloadAnchor.click();
     downloadAnchor.remove();
-    showToast("데이터 백업 파일이 내보내졌습니다.", "success");
+    showToast("�곗씠�� 諛깆뾽 �뚯씪�� �대낫�댁죱�듬땲��.", "success");
 }
 
 // Excel File Parsing & Handling
@@ -1595,7 +1846,7 @@ function handleFileSelect(file) {
             // Get headers and rows
             const json = XLSX.utils.sheet_to_json(worksheet, { header: 1 });
             if (json.length === 0) {
-                showToast("엑셀 파일이 비어 있습니다.", "danger");
+                showToast("�묒� �뚯씪�� 鍮꾩뼱 �덉뒿�덈떎.", "danger");
                 return;
             }
             
@@ -1608,10 +1859,10 @@ function handleFileSelect(file) {
             document.getElementById('importStep1').classList.remove('active');
             document.getElementById('importStep2').classList.add('active');
             
-            showToast("엑셀 파일이 분석되었습니다. 열 매핑을 시작해 주세요.", "success");
+            showToast("�묒� �뚯씪�� 遺꾩꽍�섏뿀�듬땲��. �� 留ㅽ븨�� �쒖옉�� 二쇱꽭��.", "success");
         } catch (err) {
             console.error("Excel read error:", err);
-            showToast("엑셀 파일을 파싱하는 데 실패했습니다. 지원 형식(.xlsx, .xls, .csv)을 확인해 주세요.", "danger");
+            showToast("�묒� �뚯씪�� �뚯떛�섎뒗 �� �ㅽ뙣�덉뒿�덈떎. 吏��� �뺤떇(.xlsx, .xls, .csv)�� �뺤씤�� 二쇱꽭��.", "danger");
         }
     };
     reader.readAsArrayBuffer(file);
@@ -1626,25 +1877,25 @@ function setupMappingUI() {
     let fields = [];
     if (importType === 'portfolio') {
         fields = [
-            { key: 'account', label: '계좌명 (Account)', required: true },
-            { key: 'name', label: '종목명 (Name)', required: true },
-            { key: 'ticker', label: '티커/종목코드 (Ticker)', required: true },
-            { key: 'shares', label: '보유수량 (Shares)', required: true },
-            { key: 'avgPrice', label: '평균매수단가 (Avg Price)', required: true },
-            { key: 'currency', label: '통화 (KRW/USD)', required: false },
-            { key: 'annualDividend', label: '주당 연배당금 (Annual Dividend)', required: true },
-            { key: 'frequency', label: '배당주기 (Monthly/Quarterly...)', required: false },
-            { key: 'exMonths', label: '배당월 목록 (예: 3,6,9,12)', required: false }
+            { key: 'account', label: '怨꾩쥖紐� (Account)', required: true },
+            { key: 'name', label: '醫낅ぉ紐� (Name)', required: true },
+            { key: 'ticker', label: '�곗빱/醫낅ぉ肄붾뱶 (Ticker)', required: true },
+            { key: 'shares', label: '蹂댁쑀�섎웾 (Shares)', required: true },
+            { key: 'avgPrice', label: '�됯퇏留ㅼ닔�④� (Avg Price)', required: true },
+            { key: 'currency', label: '�듯솕 (KRW/USD)', required: false },
+            { key: 'annualDividend', label: '二쇰떦 �곕같�밴툑 (Annual Dividend)', required: true },
+            { key: 'frequency', label: '諛곕떦二쇨린 (Monthly/Quarterly...)', required: false },
+            { key: 'exMonths', label: '諛곕떦�� 紐⑸줉 (��: 3,6,9,12)', required: false }
         ];
     } else {
         // Dividend logs
         fields = [
-            { key: 'date', label: '배당 수령일 (Date)', required: true },
-            { key: 'ticker', label: '티커 또는 종목코드 (Ticker)', required: true },
-            { key: 'amount', label: '세전 배당금액 (Amount)', required: true },
-            { key: 'currency', label: '통화 (KRW/USD)', required: false },
-            { key: 'tax', label: '배당세금 (Tax)', required: false },
-            { key: 'exchangeRate', label: '환율 (Exchange Rate)', required: false }
+            { key: 'date', label: '諛곕떦 �섎졊�� (Date)', required: true },
+            { key: 'ticker', label: '�곗빱 �먮뒗 醫낅ぉ肄붾뱶 (Ticker)', required: true },
+            { key: 'amount', label: '�몄쟾 諛곕떦湲덉븸 (Amount)', required: true },
+            { key: 'currency', label: '�듯솕 (KRW/USD)', required: false },
+            { key: 'tax', label: '諛곕떦�멸툑 (Tax)', required: false },
+            { key: 'exchangeRate', label: '�섏쑉 (Exchange Rate)', required: false }
         ];
     }
 
@@ -1662,22 +1913,22 @@ function setupMappingUI() {
             if (hLower === lowercaseKey || 
                 hLower.includes(lowercaseKey) || 
                 lowercaseLabel.includes(hLower) ||
-                (f.key === 'account' && (hLower.includes('계좌') || hLower.includes('acc'))) ||
-                (f.key === 'avgPrice' && (hLower.includes('단가') || hLower.includes('매수가') || hLower.includes('평단'))) ||
-                (f.key === 'shares' && (hLower.includes('수량') || hLower.includes('보유') || hLower.includes('개수'))) ||
-                (f.key === 'annualDividend' && (hLower.includes('배당금') || hLower.includes('연배당'))) ||
-                (f.key === 'exMonths' && hLower.includes('배당월')) ||
-                (f.key === 'ticker' && (hLower.includes('코드') || hLower.includes('티커') || hLower.includes('symbol'))) ||
-                (f.key === 'date' && (hLower.includes('일자') || hLower.includes('날짜') || hLower.includes('배당일'))) ||
-                (f.key === 'tax' && (hLower.includes('세금') || hLower.includes('원천징수'))) ||
-                (f.key === 'amount' && (hLower.includes('수령액') || hLower.includes('금액') || hLower.includes('배당금')))) {
+                (f.key === 'account' && (hLower.includes('怨꾩쥖') || hLower.includes('acc'))) ||
+                (f.key === 'avgPrice' && (hLower.includes('�④�') || hLower.includes('留ㅼ닔媛�') || hLower.includes('�됰떒'))) ||
+                (f.key === 'shares' && (hLower.includes('�섎웾') || hLower.includes('蹂댁쑀') || hLower.includes('媛쒖닔'))) ||
+                (f.key === 'annualDividend' && (hLower.includes('諛곕떦湲�') || hLower.includes('�곕같��'))) ||
+                (f.key === 'exMonths' && hLower.includes('諛곕떦��')) ||
+                (f.key === 'ticker' && (hLower.includes('肄붾뱶') || hLower.includes('�곗빱') || hLower.includes('symbol'))) ||
+                (f.key === 'date' && (hLower.includes('�쇱옄') || hLower.includes('�좎쭨') || hLower.includes('諛곕떦��'))) ||
+                (f.key === 'tax' && (hLower.includes('�멸툑') || hLower.includes('�먯쿇吏뺤닔'))) ||
+                (f.key === 'amount' && (hLower.includes('�섎졊��') || hLower.includes('湲덉븸') || hLower.includes('諛곕떦湲�')))) {
                 bestMatch = header;
                 break;
             }
         }
 
         let options = excelHeaders.map(h => `<option value="${h}" ${h === bestMatch ? 'selected' : ''}>${h}</option>`).join('');
-        options = `<option value="">-- 매핑 안 함 ${f.required ? '(필수)' : ''} --</option>` + options;
+        options = `<option value="">-- 留ㅽ븨 �� �� ${f.required ? '(�꾩닔)' : ''} --</option>` + options;
         
         formGroup.innerHTML = `
             <label>${f.label}</label>
@@ -1702,7 +1953,7 @@ async function executeImport() {
     let successCount = 0;
     let failCount = 0;
     
-    showToast("데이터를 가져오는 중입니다...", "warning");
+    showToast("�곗씠�곕� 媛��몄삤�� 以묒엯�덈떎...", "warning");
 
     if (importType === 'portfolio') {
         const mapAccount = document.getElementById('map-account').value;
@@ -1744,7 +1995,7 @@ async function executeImport() {
                 let currency = 'KRW';
                 if (mapCurrency && row[mapCurrency]) {
                     const curStr = String(row[mapCurrency]).trim().toUpperCase();
-                    if (curStr === 'USD' || curStr === '$' || curStr.includes('달러')) {
+                    if (curStr === 'USD' || curStr === '$' || curStr.includes('�щ윭')) {
                         currency = 'USD';
                     }
                 } else {
@@ -1758,9 +2009,9 @@ async function executeImport() {
                 let frequency = 'Quarterly';
                 if (mapFrequency && row[mapFrequency]) {
                     const freqStr = String(row[mapFrequency]).trim().toLowerCase();
-                    if (freqStr.includes('월') || freqStr.includes('month')) frequency = 'Monthly';
-                    else if (freqStr.includes('반') || freqStr.includes('semi')) frequency = 'Semi-Annual';
-                    else if (freqStr.includes('년') || freqStr.includes('annual')) frequency = 'Annual';
+                    if (freqStr.includes('��') || freqStr.includes('month')) frequency = 'Monthly';
+                    else if (freqStr.includes('諛�') || freqStr.includes('semi')) frequency = 'Semi-Annual';
+                    else if (freqStr.includes('��') || freqStr.includes('annual')) frequency = 'Annual';
                 }
 
                 // ExMonths check
@@ -1811,12 +2062,12 @@ async function executeImport() {
                         // Excel serial date representation
                         const excelEpoch = new Date(Date.UTC(1899, 11, 30));
                         const targetDate = new Date(excelEpoch.getTime() + rawDate * 24 * 60 * 60 * 1000);
-                        dateStr = targetDate.toISOString().split('T')[0];
+                        dateStr = core.localDateString(targetDate);
                     } else {
                         // Regular string date format
                         const dateObj = new Date(String(rawDate).trim());
                         if (!isNaN(dateObj.getTime())) {
-                            dateStr = dateObj.toISOString().split('T')[0];
+                            dateStr = core.localDateString(dateObj);
                         }
                     }
                 }
@@ -1835,7 +2086,7 @@ async function executeImport() {
                     // Create dummy stock under default account
                     let defaultAcc = state.accounts[0];
                     if (!defaultAcc) {
-                        defaultAcc = { id: 'acc-default', name: '가져온 계좌', type: 'General' };
+                        defaultAcc = { id: 'acc-default', name: '媛��몄삩 怨꾩쥖', type: 'General' };
                         state.accounts.push(defaultAcc);
                     }
                     stock = {
@@ -1856,17 +2107,28 @@ async function executeImport() {
                 const currency = (mapCurrency && row[mapCurrency]) ? String(row[mapCurrency]).trim().toUpperCase() : stock.currency;
                 
                 let rate = 1;
+                let rateDate = dateStr;
+                let rateSource = 'not-applicable';
+                let rateRequestedDate = dateStr;
                 if (currency === 'USD') {
                     if (mapRate && row[mapRate] && !isNaN(parseFloat(row[mapRate]))) {
                         rate = parseFloat(row[mapRate]);
+                        if (!core.isPositiveNumber(rate)) throw new Error('�섏쑉 媛믪씠 �щ컮瑜댁� �딆뒿�덈떎.');
+                        rateSource = 'excel-manual';
                     } else {
                         // Fetch historical rate
-                        rate = await getHistoricalExchangeRate(dateStr);
+                        const result = await getHistoricalExchangeRate(dateStr);
+                        if (!result.ok) throw new Error(`${dateStr} 怨쇨굅 �섏쑉 議고쉶 �ㅽ뙣`);
+                        rate = result.rate;
+                        rateDate = result.rateDate;
+                        rateRequestedDate = result.requestedDate;
+                        rateSource = result.source;
                     }
                 }
 
                 const amountKRW = currency === 'KRW' ? amount : amount * rate;
                 const tax = (mapTax && row[mapTax]) ? parseFloat(row[mapTax]) : 0;
+                const safeTax = isNaN(tax) ? 0 : tax;
 
                 const newLog = {
                     id: 'log-' + Date.now() + Math.random().toString(36).substr(2, 5),
@@ -1876,7 +2138,13 @@ async function executeImport() {
                     currency,
                     exchangeRate: rate,
                     amountKRW,
-                    tax: isNaN(tax) ? 0 : tax
+                    tax: safeTax,
+                    netAmount: amount - safeTax,
+                    netAmountKRW: amountKRW - (safeTax * rate),
+                    exchangeRateDate: rateDate,
+                    exchangeRateRequestedDate: rateRequestedDate,
+                    exchangeRateSource: rateSource,
+                    exchangeRateIsFallback: false
                 };
 
                 state.dividendLogs.push(newLog);
@@ -1900,7 +2168,7 @@ async function executeImport() {
 
     renderAll();
     
-    showToast(`${successCount}개의 행을 성공적으로 가져왔습니다. (오류: ${failCount}개)`, "success");
+    showToast(`${successCount}媛쒖쓽 �됱쓣 �깃났�곸쑝濡� 媛��몄솕�듬땲��. (�ㅻ쪟: ${failCount}媛�)`, "success");
     switchTab('tab-dashboard');
 }
 
@@ -1926,38 +2194,54 @@ function renderAll() {
 
 function renderKPIs() {
     // Calculators
-    let totalCostBasis = 0;        // 매수금액 (shares × avgPrice)
-    let totalMarketValue = 0;      // 평가금액 (shares × currentPrice)
+    let totalCostBasis = 0;        // 留ㅼ닔湲덉븸 (shares 횞 avgPrice)
+    let totalMarketValue = 0;      // �됯�湲덉븸 (shares 횞 currentPrice)
     let totalExpectedAnnualDiv = 0;
+    let pricedCostBasis = 0;
+    let pricedExpectedAnnualDiv = 0;
+    let freshCount = 0;
+    let staleCount = 0;
+    let missingCount = 0;
 
     state.portfolio.forEach(stock => {
         const costVal = stock.shares * stock.avgPrice;
-        const marketVal = stock.shares * getStockCurrentPrice(stock);
+        const priceData = getStockPriceData(stock);
+        const freshness = core.getPriceFreshness(priceData);
+        const marketVal = freshness.available ? stock.shares * Number(priceData.price) : 0;
         const expectedDiv = stock.shares * stock.annualDividend;
         
         totalCostBasis += getValInActiveCurrency(costVal, stock.currency);
-        totalMarketValue += getValInActiveCurrency(marketVal, stock.currency);
+        if (freshness.available) {
+            totalMarketValue += getValInActiveCurrency(marketVal, stock.currency) || 0;
+            pricedCostBasis += getValInActiveCurrency(costVal, stock.currency) || 0;
+            pricedExpectedAnnualDiv += getValInActiveCurrency(expectedDiv, stock.currency) || 0;
+            if (freshness.stale) staleCount++; else freshCount++;
+        } else {
+            missingCount++;
+        }
         totalExpectedAnnualDiv += getValInActiveCurrency(expectedDiv, stock.currency);
     });
 
     // Cumulative Received Dividend
     let totalReceivedDiv = 0;
     state.dividendLogs.forEach(log => {
-        totalReceivedDiv += getValInActiveCurrency(log.amount, log.currency);
+        totalReceivedDiv += getDividendRecordValue(log, 'gross') || 0;
     });
 
     // Average Yield (based on market value)
-    const avgYield = totalMarketValue > 0 ? (totalExpectedAnnualDiv / totalMarketValue) * 100 : 0;
+    const avgYield = totalMarketValue > 0 ? (pricedExpectedAnnualDiv / totalMarketValue) * 100 : 0;
     
     // Profit / Loss
-    const profitLoss = totalMarketValue - totalCostBasis;
-    const profitLossRate = totalCostBasis > 0 ? (profitLoss / totalCostBasis) * 100 : 0;
+    const profitLoss = totalMarketValue - pricedCostBasis;
+    const profitLossRate = pricedCostBasis > 0 ? (profitLoss / pricedCostBasis) * 100 : 0;
     const plSign = profitLoss >= 0 ? '+' : '';
     const plClass = profitLoss >= 0 ? 'positive' : 'negative';
 
     // Update elements
     document.getElementById('kpiTotalCost').textContent = formatCurrency(totalCostBasis);
     document.getElementById('kpiMarketValue').textContent = formatCurrency(totalMarketValue);
+    const coverageEl = document.getElementById('kpiMarketCoverage');
+    if (coverageEl) coverageEl.textContent = `�쒖꽭 �ы븿 ${freshCount + staleCount}/${state.portfolio.length} 쨌 理쒖떊 ${freshCount} 쨌 �ㅻ옒�� ${staleCount} 쨌 誘몄“�� ${missingCount}`;
     
     const plEl = document.getElementById('kpiProfitLoss');
     if (plEl) {
@@ -1983,8 +2267,8 @@ function renderAccountsTable() {
         listContainer.innerHTML = `
             <div class="empty-state full-width">
                 <i data-lucide="wallet"></i>
-                <h3>등록된 계좌가 없습니다</h3>
-                <p>배당주를 관리할 계좌를 등록해 주세요.</p>
+                <h3>�깅줉�� 怨꾩쥖媛� �놁뒿�덈떎</h3>
+                <p>諛곕떦二쇰� 愿�由ы븷 怨꾩쥖瑜� �깅줉�� 二쇱꽭��.</p>
             </div>
         `;
         return;
@@ -2023,16 +2307,16 @@ function renderAccountsTable() {
             </div>
             <div class="account-card-body">
                 <div class="account-stat">
-                    <span class="account-stat-label">매수 금액</span>
+                    <span class="account-stat-label">留ㅼ닔 湲덉븸</span>
                     <span class="account-stat-value">${formatCurrency(accCostVal)}</span>
                 </div>
                 <div class="account-stat">
-                    <span class="account-stat-label">평가 금액</span>
+                    <span class="account-stat-label">�됯� 湲덉븸</span>
                     <span class="account-stat-value">${formatCurrency(accMarketVal)}</span>
                     <span class="kpi-trend ${accPLClass}" style="font-size: 0.75rem;">${accPLSign}${accPLRate.toFixed(2)}%</span>
                 </div>
                 <div class="account-stat">
-                    <span class="account-stat-label">연 예상 배당금</span>
+                    <span class="account-stat-label">�� �덉긽 諛곕떦湲�</span>
                     <span class="account-stat-value">${formatCurrency(accExpectedDiv)}</span>
                 </div>
             </div>
@@ -2060,8 +2344,8 @@ function renderPortfolioTable() {
             <tr>
                 <td colspan="13" class="empty-state">
                     <i data-lucide="folder-open"></i>
-                    <h3>보유 종목이 없습니다</h3>
-                    <p>조건에 맞는 종목이 없거나 등록된 주식이 없습니다.</p>
+                    <h3>蹂댁쑀 醫낅ぉ�� �놁뒿�덈떎</h3>
+                    <p>議곌굔�� 留욌뒗 醫낅ぉ�� �녾굅�� �깅줉�� 二쇱떇�� �놁뒿�덈떎.</p>
                 </td>
             </tr>
         `;
@@ -2076,11 +2360,11 @@ function renderPortfolioTable() {
         const totalMarketVal = stock.shares * currentPrice;
         const profitLoss = totalMarketVal - totalCost;
         const plRate = totalCost > 0 ? (profitLoss / totalCost) * 100 : 0;
-        const yieldRate = currentPrice > 0 ? (stock.annualDividend / currentPrice) * 100 : 0;
+        const yieldRate = hasAnyPrice(stock) && currentPrice > 0 ? (stock.annualDividend / currentPrice) * 100 : null;
         
         return {
             ...stock,
-            accName: acc ? acc.name : '미지정 계좌',
+            accName: acc ? acc.name : '誘몄��� 怨꾩쥖',
             accType: acc ? acc.type : 'General',
             currentPrice,
             totalCost,
@@ -2114,9 +2398,9 @@ function renderPortfolioTable() {
         const rowClass = `row-account-${stock.accType.toLowerCase()}`;
         
         // Display current price or dash if not fetched
-        const curPriceDisplay = hasLivePrice(stock) 
-            ? formatCurrency(stock.currentPrice, stock.currency)
-            : '<span style="color:var(--text-secondary);">—</span>';
+        const curPriceDisplay = hasAnyPrice(stock)
+            ? `${formatCurrency(stock.currentPrice, stock.currency)}${formatPriceQuoteMeta(stock)}`
+            : `<span style="color:var(--text-secondary);">��</span>${formatPriceQuoteMeta(stock)}`;
         
         const tr = document.createElement('tr');
         tr.className = rowClass;
@@ -2128,14 +2412,14 @@ function renderPortfolioTable() {
             <td>${formatCurrency(stock.avgPrice, stock.currency)}</td>
             <td>${formatCurrency(stock.totalCost, stock.currency)}</td>
             <td>${curPriceDisplay}</td>
-            <td>${hasLivePrice(stock) ? formatCurrency(stock.totalMarketVal, stock.currency) : '<span style="color:var(--text-secondary);">—</span>'}</td>
-            <td>${hasLivePrice(stock) ? `<span class="kpi-trend ${plClass}">${plSign}${formatCurrency(stock.profitLoss, stock.currency)}<br><small>(${plSign}${stock.plRate.toFixed(2)}%)</small></span>` : '<span style="color:var(--text-secondary);">—</span>'}</td>
+            <td>${hasAnyPrice(stock) ? formatCurrency(stock.totalMarketVal, stock.currency) : '<span style="color:var(--text-secondary);">��</span>'}</td>
+            <td>${hasAnyPrice(stock) ? `<span class="kpi-trend ${plClass}">${plSign}${formatCurrency(stock.profitLoss, stock.currency)}<br><small>(${plSign}${stock.plRate.toFixed(2)}%)</small></span>` : '<span style="color:var(--text-secondary);">��</span>'}</td>
             <td>${formatCurrency(stock.annualDividend, stock.currency)}</td>
             <td>${formatCurrency(totalDiv, stock.currency)}</td>
-            <td><span class="kpi-trend positive">${stock.yieldRate.toFixed(2)}%</span></td>
+            <td>${stock.yieldRate === null ? '<span style="color:var(--text-secondary);">��</span>' : `<span class="kpi-trend positive">${stock.yieldRate.toFixed(2)}%</span>`}</td>
             <td>
                 <div class="action-btns">
-                    <button class="btn-table-icon" onclick="openShareHistoryModal('${stock.id}')" title="수량 변동 이력">
+                    <button class="btn-table-icon" onclick="openShareHistoryModal('${stock.id}')" title="�섎웾 蹂��� �대젰">
                         <i data-lucide="history"></i>
                     </button>
                     <button class="btn-table-icon" onclick="openEditPortfolio('${stock.id}')">
@@ -2158,10 +2442,10 @@ function renderDividendLogsTable() {
     if (state.dividendLogs.length === 0) {
         tbody.innerHTML = `
             <tr>
-                <td colspan="7" class="empty-state">
+                <td colspan="8" class="empty-state">
                     <i data-lucide="bar-chart-2"></i>
-                    <h3>기록된 배당 수령 내역이 없습니다</h3>
-                    <p>우측 상단의 배당 수령 기록을 등록하거나 엑셀로 한 번에 가져오세요.</p>
+                    <h3>湲곕줉�� 諛곕떦 �섎졊 �댁뿭�� �놁뒿�덈떎</h3>
+                    <p>�곗륫 �곷떒�� 諛곕떦 �섎졊 湲곕줉�� �깅줉�섍굅�� �묒�濡� �� 踰덉뿉 媛��몄삤�몄슂.</p>
                 </td>
             </tr>
         `;
@@ -2203,10 +2487,10 @@ function renderDividendLogsTable() {
     if (filteredLogs.length === 0) {
         tbody.innerHTML = `
             <tr>
-                <td colspan="7" class="empty-state">
+                <td colspan="8" class="empty-state">
                     <i data-lucide="filter"></i>
-                    <h3>필터 조건에 맞는 배당 수령 내역이 없습니다</h3>
-                    <p>다른 필터 조건을 선택해 보세요.</p>
+                    <h3>�꾪꽣 議곌굔�� 留욌뒗 諛곕떦 �섎졊 �댁뿭�� �놁뒿�덈떎</h3>
+                    <p>�ㅻⅨ �꾪꽣 議곌굔�� �좏깮�� 蹂댁꽭��.</p>
                 </td>
             </tr>
         `;
@@ -2230,8 +2514,8 @@ function renderDividendLogsTable() {
         const accNameA = accA ? accA.name : '';
         const accNameB = accB ? accB.name : '';
 
-        const stockNameA = isEtcA ? '기타' : (stockA ? stockA.name : '');
-        const stockNameB = isEtcB ? '기타' : (stockB ? stockB.name : '');
+        const stockNameA = isEtcA ? '湲고�' : (stockA ? stockA.name : '');
+        const stockNameB = isEtcB ? '湲고�' : (stockB ? stockB.name : '');
 
         switch (sortDividend) {
             case 'date-asc':
@@ -2257,29 +2541,36 @@ function renderDividendLogsTable() {
 
     filteredLogs.forEach(log => {
         const isEtc = log.portfolioId && log.portfolioId.startsWith('etc-');
-        let stockName = '기타';
+        let stockName = '湲고�';
         let ticker = 'ETC';
         let accountId = '';
         if (isEtc) {
             accountId = log.portfolioId.replace('etc-', '');
         } else {
             const stock = state.portfolio.find(p => p.id === log.portfolioId);
-            stockName = stock ? stock.name : '삭제된 종목';
+            stockName = stock ? stock.name : '��젣�� 醫낅ぉ';
             ticker = stock ? stock.ticker : '-';
             accountId = stock ? stock.accountId : '';
         }
         
         const acc = state.accounts.find(a => a.id === accountId);
-        const accName = acc ? acc.name : '미지정 계좌';
+        const accName = acc ? acc.name : '誘몄��� 怨꾩쥖';
         const accType = acc ? acc.type : 'General';
         
         // Format date to Year-Month (e.g. 2026-06)
         const dateParts = log.date.split('-');
         const yyyymm = dateParts.length >= 2 ? `${dateParts[0]}-${dateParts[1]}` : log.date;
         
-        const rateText = log.currency === 'USD' 
-            ? `<br><small style="color: var(--text-secondary); font-size: 0.75rem;">(환율: ₩${log.exchangeRate.toFixed(1)} / ${yyyymm} 기준)</small>` 
+        const rateValue = Number(log.exchangeRate);
+        const rateBasis = log.exchangeRateDate
+            ? (log.exchangeRateDate === log.date ? `${log.exchangeRateDate} 湲곗�` : `${log.date} �붿껌 쨌 ${log.exchangeRateDate} 湲곗�`)
+            : '湲곗��� 誘명솗��';
+        const sourceText = log.exchangeRateSource === 'legacy-confirmed' ? '湲곗〈 ���κ컪' : (log.exchangeRateSource || '�섎룞 �낅젰');
+        const rateText = log.currency === 'USD' && core.isPositiveNumber(rateValue)
+            ? `<br><small style="color: var(--text-secondary); font-size: 0.75rem;">�섏쑉 ��${rateValue.toFixed(2)} 쨌 ${rateBasis} 쨌 ${sourceText}</small>`
             : '';
+        const grossKRW = core.getDividendKRW(log, 'gross');
+        const netKRW = core.getDividendKRW(log, 'net');
         
         // CSS Row Class
         const rowClass = `row-account-${accType.toLowerCase()}`;
@@ -2292,10 +2583,11 @@ function renderDividendLogsTable() {
             <td><strong>${stockName}</strong> <span class="ticker-badge">${ticker}</span></td>
             <td>${formatCurrency(log.amount, log.currency)}</td>
             <td>
-                ${formatCurrency(log.amountKRW, 'KRW')}
+                ${grossKRW === null ? '��' : formatCurrency(grossKRW, 'KRW')}
                 ${rateText}
             </td>
             <td>${formatCurrency(log.tax, log.currency)}</td>
+            <td>${netKRW === null ? '��' : formatCurrency(netKRW, 'KRW')}</td>
             <td>
                 <div class="action-btns">
                     <button class="btn-table-icon" onclick="openEditDividend('${log.id}')">
@@ -2335,11 +2627,8 @@ function renderCharts() {
 
 // Month sorting key helper YYYY-MM
 function getMonthKey(dateStr) {
-    const d = new Date(dateStr);
-    if (isNaN(d.getTime())) return 'Unknown';
-    const year = d.getFullYear();
-    const month = String(d.getMonth() + 1).padStart(2, '0');
-    return `${year}-${month}`;
+    const match = String(dateStr || '').match(/^(\d{4})-(\d{2})/);
+    return match ? `${match[1]}-${match[2]}` : 'Unknown';
 }
 
 function renderMonthlyDividendChart(textColor, gridColor) {
@@ -2377,7 +2666,7 @@ function renderMonthlyDividendChart(textColor, gridColor) {
             accountId = stock ? stock.accountId : 'unknown-acc';
         }
         const account = state.accounts.find(a => a.id === accountId);
-        const accountName = account ? account.name : '기타/직접입력';
+        const accountName = account ? account.name : '湲고�/吏곸젒�낅젰';
 
         if (!accountsMap[accountId]) {
             accountsMap[accountId] = {
@@ -2387,7 +2676,7 @@ function renderMonthlyDividendChart(textColor, gridColor) {
             sortedMonths.forEach(m => accountsMap[accountId].data[m] = 0);
         }
 
-        const amtActive = getValInActiveCurrency(log.amount, log.currency);
+        const amtActive = getDividendRecordValue(log, 'gross') || 0;
         accountsMap[accountId].data[key] += amtActive;
     });
 
@@ -2422,7 +2711,7 @@ function renderMonthlyDividendChart(textColor, gridColor) {
         data: {
             labels: sortedMonths.map(m => {
                 const parts = m.split('-');
-                return `${parts[0]}년 ${parseInt(parts[1])}월`;
+                return `${parts[0]}�� ${parseInt(parts[1])}��`;
             }),
             datasets: datasets
         },
@@ -2444,7 +2733,7 @@ function renderMonthlyDividendChart(textColor, gridColor) {
                         callback: function(value) {
                             return state.activeCurrency === 'USD' 
                                 ? '$' + value 
-                                : (value >= 10000 ? (value / 10000) + '만' : value);
+                                : (value >= 10000 ? (value / 10000) + '留�' : value);
                         }
                     }
                 }
@@ -2598,7 +2887,7 @@ function renderCumulativeChart(textColor, gridColor) {
 
     sortedLogs.forEach(log => {
         dates.push(log.date);
-        cumulativeSum += getValInActiveCurrency(log.amount, log.currency);
+        cumulativeSum += getDividendRecordValue(log, 'gross') || 0;
         values.push(cumulativeSum);
     });
 
@@ -2607,7 +2896,7 @@ function renderCumulativeChart(textColor, gridColor) {
         data: {
             labels: dates,
             datasets: [{
-                label: '누적 배당금 수령액',
+                label: '�꾩쟻 �몄쟾 諛곕떦湲� (湲곕줉 �섏쑉)',
                 data: values,
                 borderColor: '#a855f7',
                 borderWidth: 3,
@@ -2633,7 +2922,7 @@ function renderCumulativeChart(textColor, gridColor) {
                         callback: function(value) {
                             return state.activeCurrency === 'USD' 
                                 ? '$' + value 
-                                : (value >= 10000 ? (value / 10000) + '만' : value);
+                                : (value >= 10000 ? (value / 10000) + '留�' : value);
                         }
                     }
                 }
@@ -2643,7 +2932,7 @@ function renderCumulativeChart(textColor, gridColor) {
                 tooltip: {
                     callbacks: {
                         label: function(context) {
-                            return ` 누적 배당금: ${formatCurrency(context.parsed.y)}`;
+                            return ` �꾩쟻 �몄쟾 諛곕떦湲�: ${formatCurrency(context.parsed.y)}`;
                         }
                     }
                 }
@@ -2669,7 +2958,7 @@ function openShareHistoryModal(portfolioId) {
     document.getElementById('shareHistoryStockName').textContent = `${stock.name} (${stock.ticker})`;
     
     // Reset form inputs
-    document.getElementById('historyDate').value = new Date().toISOString().split('T')[0];
+    document.getElementById('historyDate').value = core.localDateString();
     document.getElementById('historyShares').value = '';
     
     // Render list
@@ -2690,7 +2979,7 @@ function renderShareHistoryList(portfolioId) {
         tbody.innerHTML = `
             <tr>
                 <td colspan="3" style="text-align: center; color: var(--text-secondary); padding: 1rem;">
-                    기록된 수량 변동 이력이 없습니다.
+                    湲곕줉�� �섎웾 蹂��� �대젰�� �놁뒿�덈떎.
                 </td>
             </tr>
         `;
@@ -2704,7 +2993,7 @@ function renderShareHistoryList(portfolioId) {
         const tr = document.createElement('tr');
         tr.innerHTML = `
             <td style="padding: 0.5rem; text-align: left;">${item.date}</td>
-            <td style="padding: 0.5rem; text-align: left;">${item.shares.toLocaleString()} 주</td>
+            <td style="padding: 0.5rem; text-align: left;">${item.shares.toLocaleString()} 二�</td>
             <td style="text-align: center; padding: 0.5rem;">
                 <button class="btn-table-icon delete" onclick="deleteShareHistoryEntry('${item.id}')">
                     <i data-lucide="trash-2"></i>
@@ -2725,14 +3014,14 @@ function handleShareHistorySubmit(e) {
     const sharesVal = parseFloat(document.getElementById('historyShares').value);
     
     if (!dateVal || isNaN(sharesVal) || sharesVal <= 0) {
-        showToast("올바른 날짜와 수량을 입력해 주세요.", "warning");
+        showToast("�щ컮瑜� �좎쭨�� �섎웾�� �낅젰�� 二쇱꽭��.", "warning");
         return;
     }
     
     // Check if there is already an entry for this exact date
     const existing = state.shareHistory.find(sh => sh.portfolioId === activeShareHistoryPortfolioId && sh.date === dateVal);
     if (existing) {
-        if (confirm("해당 날짜에 이미 수량 기록이 존재합니다. 값을 수정하시겠습니까?")) {
+        if (confirm("�대떦 �좎쭨�� �대� �섎웾 湲곕줉�� 議댁옱�⑸땲��. 媛믪쓣 �섏젙�섏떆寃좎뒿�덇퉴?")) {
             existing.shares = sharesVal;
         } else {
             return;
@@ -2756,7 +3045,7 @@ function handleShareHistorySubmit(e) {
     
     // Reset form inputs except date
     document.getElementById('historyShares').value = '';
-    showToast("수량 변동 이력이 추가/수정되었습니다.", "success");
+    showToast("�섎웾 蹂��� �대젰�� 異붽�/�섏젙�섏뿀�듬땲��.", "success");
 }
 
 function deleteShareHistoryEntry(id) {
@@ -2767,11 +3056,11 @@ function deleteShareHistoryEntry(id) {
     const stockHistory = state.shareHistory.filter(sh => sh.portfolioId === portfolioId);
     
     if (stockHistory.length <= 1) {
-        showToast("최소 하나의 보유 수량 이력이 존재해야 하므로 삭제할 수 없습니다.", "warning");
+        showToast("理쒖냼 �섎굹�� 蹂댁쑀 �섎웾 �대젰�� 議댁옱�댁빞 �섎�濡� ��젣�� �� �놁뒿�덈떎.", "warning");
         return;
     }
     
-    if (confirm("이 보유 수량 이력 기록을 삭제하시겠습니까?")) {
+    if (confirm("�� 蹂댁쑀 �섎웾 �대젰 湲곕줉�� ��젣�섏떆寃좎뒿�덇퉴?")) {
         state.shareHistory = state.shareHistory.filter(sh => sh.id !== id);
         
         // Sync shares
@@ -2780,7 +3069,7 @@ function deleteShareHistoryEntry(id) {
         saveState();
         renderAll();
         renderShareHistoryList(portfolioId);
-        showToast("수량 이력 기록이 삭제되었습니다.", "success");
+        showToast("�섎웾 �대젰 湲곕줉�� ��젣�섏뿀�듬땲��.", "success");
     }
 }
 
@@ -2801,11 +3090,11 @@ function populateReinvestStockSelect() {
     if (!select) return;
     
     const selectedId = select.value;
-    select.innerHTML = '<option value="">-- 종목 선택 --</option>';
+    select.innerHTML = '<option value="">-- 醫낅ぉ �좏깮 --</option>';
     
     state.portfolio.forEach(p => {
         const acc = state.accounts.find(a => a.id === p.accountId);
-        const accName = acc ? acc.name : '미지정 계좌';
+        const accName = acc ? acc.name : '誘몄��� 怨꾩쥖';
         const option = document.createElement('option');
         option.value = p.id;
         option.textContent = `[${accName}] ${p.name} (${p.ticker})`;
@@ -2932,7 +3221,7 @@ function renderReinvestmentTab() {
     });
     
     // UPDATE KPIS
-    document.getElementById('reinvestKpiShares').textContent = `${stock.shares.toLocaleString()}주`;
+    document.getElementById('reinvestKpiShares').textContent = `${stock.shares.toLocaleString()}二�`;
     document.getElementById('reinvestKpiAvgPrice').textContent = formatCurrency(stock.avgPrice, stock.currency);
     
     // Total received dividend for this stock
@@ -2970,11 +3259,11 @@ function renderReinvestmentTab() {
         const displayYield = row.yield > 0 ? row.yield.toFixed(2) + '%' : '-';
         
         const parts = row.month.split('-');
-        const monthLabel = `${parts[0]}년 ${parseInt(parts[1])}월`;
+        const monthLabel = `${parts[0]}�� ${parseInt(parts[1])}��`;
         
         tr.innerHTML = `
             <td style="padding: 0.75rem 0.5rem;"><strong>${monthLabel}</strong></td>
-            <td style="padding: 0.75rem 0.5rem;">${row.shares.toLocaleString()} 주</td>
+            <td style="padding: 0.75rem 0.5rem;">${row.shares.toLocaleString()} 二�</td>
             <td style="padding: 0.75rem 0.5rem;">${displayDiv}</td>
             <td style="padding: 0.75rem 0.5rem;">${displayDPS}</td>
             <td style="padding: 0.75rem 0.5rem;"><span style="color: var(--primary); font-weight: 500;">${displayYield}</span></td>
@@ -3001,7 +3290,7 @@ function renderReinvestmentTab() {
     
     const chartLabels = timelineData.map(d => {
         const parts = d.month.split('-');
-        return `${parts[0]}년 ${parseInt(parts[1])}월`;
+        return `${parts[0]}�� ${parseInt(parts[1])}��`;
     });
     
     const dividendData = timelineData.map(d => d.dividend);
@@ -3013,7 +3302,7 @@ function renderReinvestmentTab() {
             labels: chartLabels,
             datasets: [
                 {
-                    label: `월 배당금 (${stock.currency})`,
+                    label: `�� 諛곕떦湲� (${stock.currency})`,
                     type: 'bar',
                     data: dividendData,
                     backgroundColor: 'rgba(99, 102, 241, 0.65)',
@@ -3023,7 +3312,7 @@ function renderReinvestmentTab() {
                     yAxisID: 'y'
                 },
                 {
-                    label: '보유 주식 수 (주)',
+                    label: '蹂댁쑀 二쇱떇 �� (二�)',
                     type: 'line',
                     data: sharesData,
                     borderColor: '#a855f7',
@@ -3052,12 +3341,12 @@ function renderReinvestmentTab() {
                     ticks: {
                         color: textColor,
                         callback: function(value) {
-                            return stock.currency === 'USD' ? '$' + value : value.toLocaleString() + '원';
+                            return stock.currency === 'USD' ? '$' + value : value.toLocaleString() + '��';
                         }
                     },
                     title: {
                         display: true,
-                        text: `배당금 (${stock.currency})`,
+                        text: `諛곕떦湲� (${stock.currency})`,
                         color: textColor,
                         font: { size: 11, weight: 'bold' }
                     }
@@ -3070,12 +3359,12 @@ function renderReinvestmentTab() {
                     ticks: {
                         color: textColor,
                         callback: function(value) {
-                            return value.toLocaleString() + ' 주';
+                            return value.toLocaleString() + ' 二�';
                         }
                     },
                     title: {
                         display: true,
-                        text: '보유 주식 수 (주)',
+                        text: '蹂댁쑀 二쇱떇 �� (二�)',
                         color: textColor,
                         font: { size: 11, weight: 'bold' }
                     }
@@ -3096,7 +3385,7 @@ function renderReinvestmentTab() {
                             if (context.datasetIndex === 0) {
                                 label += formatCurrency(context.parsed.y, stock.currency);
                             } else {
-                                label += context.parsed.y.toLocaleString() + ' 주';
+                                label += context.parsed.y.toLocaleString() + ' 二�';
                             }
                             return label;
                         }
@@ -3113,8 +3402,8 @@ function isSchdFamilyStock(stock) {
     const name = (stock.name || '').toUpperCase();
     return ticker === 'SCHD' || 
            name.includes('SCHD') || 
-           ((name.includes('미국배당다우존스') || name.includes('미국배당 다우존스')) &&
-            (name.includes('SOL') || name.includes('TIGER') || name.includes('ACE') || name.includes('미래에셋') || name.includes('신한')));
+           ((name.includes('誘멸뎅諛곕떦�ㅼ슦議댁뒪') || name.includes('誘멸뎅諛곕떦 �ㅼ슦議댁뒪')) &&
+            (name.includes('SOL') || name.includes('TIGER') || name.includes('ACE') || name.includes('誘몃옒�먯뀑') || name.includes('�좏븳')));
 }
 
 let schdChartInstance = null;
@@ -3132,10 +3421,10 @@ function renderSchdAnalysis() {
     
     if (schdStocks.length === 0) {
         totalInvestedEl.textContent = '-';
-        sharesListEl.textContent = '보유 중인 SCHD 관련 종목이 없습니다.';
+        sharesListEl.textContent = '蹂댁쑀 以묒씤 SCHD 愿��� 醫낅ぉ�� �놁뒿�덈떎.';
         expectedDivEl.textContent = '-';
         avgYieldEl.textContent = '0.0%';
-        tbody.innerHTML = '<tr><td colspan="3" style="text-align: center; color: var(--text-secondary); padding: 2rem;">보유 중인 SCHD군 종목이 없습니다.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="3" style="text-align: center; color: var(--text-secondary); padding: 2rem;">蹂댁쑀 以묒씤 SCHD援� 醫낅ぉ�� �놁뒿�덈떎.</td></tr>';
         
         if (schdChartInstance) {
             schdChartInstance.destroy();
@@ -3163,14 +3452,14 @@ function renderSchdAnalysis() {
         const divActive = getValInActiveCurrency(div, s.currency);
         totalExpectedAnnualDiv += divActive;
         
-        sharesListTexts.push(`${s.name} (${s.ticker}): ${s.shares.toLocaleString()}주`);
+        sharesListTexts.push(`${s.name} (${s.ticker}): ${s.shares.toLocaleString()}二�`);
         
         const sharesAtStart = getSharesAtDate(s.id, startOfCurrentMonth);
         const newShares = Math.max(0, s.shares - sharesAtStart);
         if (newShares > 0) {
             const buyCost = newShares * s.avgPrice;
             thisMonthInvested += getValInActiveCurrency(buyCost, s.currency);
-            thisMonthSharesTexts.push(`${s.ticker} +${newShares.toLocaleString()}주`);
+            thisMonthSharesTexts.push(`${s.ticker} +${newShares.toLocaleString()}二�`);
         }
     });
     
@@ -3178,16 +3467,16 @@ function renderSchdAnalysis() {
     
     totalInvestedEl.innerHTML = formatCurrency(totalInvested) + 
         (thisMonthInvested > 0 
-            ? `<div style="font-size: 0.75rem; font-weight: 500; margin-top: 0.15rem;" class="kpi-trend positive">이번 달 +${formatCurrency(thisMonthInvested)}</div>` 
-            : `<div style="font-size: 0.75rem; font-weight: 500; margin-top: 0.15rem; color: var(--text-secondary);">이번 달 추가 매수 없음</div>`);
+            ? `<div style="font-size: 0.75rem; font-weight: 500; margin-top: 0.15rem;" class="kpi-trend positive">�대쾲 �� +${formatCurrency(thisMonthInvested)}</div>` 
+            : `<div style="font-size: 0.75rem; font-weight: 500; margin-top: 0.15rem; color: var(--text-secondary);">�대쾲 �� 異붽� 留ㅼ닔 �놁쓬</div>`);
             
     sharesListEl.innerHTML = sharesListTexts.join('\n') + 
         (thisMonthSharesTexts.length > 0 
-            ? `<div style="font-size: 0.75rem; font-weight: 500; color: var(--primary); margin-top: 0.25rem;">(이번 달 추가: ${thisMonthSharesTexts.join(', ')})</div>` 
+            ? `<div style="font-size: 0.75rem; font-weight: 500; color: var(--primary); margin-top: 0.25rem;">(�대쾲 �� 異붽�: ${thisMonthSharesTexts.join(', ')})</div>` 
             : '');
             
-    expectedDivEl.textContent = `${formatCurrency(totalExpectedAnnualDiv)} / 년 (월평균 ${formatCurrency(totalExpectedAnnualDiv / 12)})`;
-    avgYieldEl.textContent = `${avgYield.toFixed(2)}% (매수 원금 대비)`;
+    expectedDivEl.textContent = `${formatCurrency(totalExpectedAnnualDiv)} / �� (�뷀룊洹� ${formatCurrency(totalExpectedAnnualDiv / 12)})`;
+    avgYieldEl.textContent = `${avgYield.toFixed(2)}% (留ㅼ닔 �먭툑 ��鍮�)`;
     
     // 2. Gather Monthly historical data
     const monthsSet = new Set();
@@ -3243,7 +3532,7 @@ function renderSchdAnalysis() {
     tbody.innerHTML = '';
     
     if (tableData.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="3" style="text-align: center; color: var(--text-secondary); padding: 1.5rem;">배당금 지급 기록이 없습니다.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="3" style="text-align: center; color: var(--text-secondary); padding: 1.5rem;">諛곕떦湲� 吏�湲� 湲곕줉�� �놁뒿�덈떎.</td></tr>';
     } else {
         tableData.forEach(item => {
             const row = document.createElement('tr');
@@ -3280,7 +3569,7 @@ function renderSchdAnalysis() {
             labels: labels,
             datasets: [
                 {
-                    label: '수령 배당금',
+                    label: '�섎졊 諛곕떦湲�',
                     data: receivedData,
                     backgroundColor: 'rgba(99, 102, 241, 0.75)',
                     borderColor: '#6366f1',
@@ -3289,7 +3578,7 @@ function renderSchdAnalysis() {
                     yAxisID: 'y'
                 },
                 {
-                    label: '배당수익률 (%)',
+                    label: '諛곕떦�섏씡瑜� (%)',
                     data: yieldData,
                     type: 'line',
                     borderColor: '#34d399',
@@ -3345,7 +3634,7 @@ function renderSchdAnalysis() {
                     },
                     title: {
                         display: true,
-                        text: '수령 배당금',
+                        text: '�섎졊 諛곕떦湲�',
                         color: textColor,
                         font: { size: 10, weight: 'bold' }
                     }
@@ -3362,7 +3651,7 @@ function renderSchdAnalysis() {
                     },
                     title: {
                         display: true,
-                        text: '배당수익률 (%)',
+                        text: '諛곕떦�섏씡瑜� (%)',
                         color: textColor,
                         font: { size: 10, weight: 'bold' }
                     }
@@ -3451,15 +3740,15 @@ function renderDividendGrowthSection() {
         const loggedStockIds = [...new Set(state.dividendLogs.map(log => log.portfolioId))];
         const prevValue = select.value;
         
-        select.innerHTML = '<option value="">종목 선택</option>';
+        select.innerHTML = '<option value="">醫낅ぉ �좏깮</option>';
         loggedStockIds.forEach(id => {
             if (id.startsWith('etc-')) {
                 const accId = id.replace('etc-', '');
                 const acc = state.accounts.find(a => a.id === accId);
-                const accName = acc ? acc.name : '기타';
+                const accName = acc ? acc.name : '湲고�';
                 const option = document.createElement('option');
                 option.value = id;
-                option.textContent = `[${accName}] 기타 (ETC)`;
+                option.textContent = `[${accName}] 湲고� (ETC)`;
                 select.appendChild(option);
                 return;
             }
@@ -3467,7 +3756,7 @@ function renderDividendGrowthSection() {
             const stock = state.portfolio.find(p => p.id === id);
             if (stock) {
                 const acc = state.accounts.find(a => a.id === stock.accountId);
-                const accName = acc ? acc.name : '미지정 계좌';
+                const accName = acc ? acc.name : '誘몄��� 怨꾩쥖';
                 const option = document.createElement('option');
                 option.value = id;
                 option.textContent = `[${accName}] ${stock.name}`;
@@ -3490,7 +3779,7 @@ function renderDividendGrowthSection() {
         
         state.portfolio.forEach(stock => {
             const acc = state.accounts.find(a => a.id === stock.accountId);
-            const accName = acc ? acc.name : '미지정 계좌';
+            const accName = acc ? acc.name : '誘몄��� 怨꾩쥖';
             const option = document.createElement('option');
             option.value = stock.id;
             option.textContent = `[${accName}] ${stock.name} (${stock.ticker})`;
@@ -3541,19 +3830,19 @@ function updateDividendGrowthAnalysis() {
         
     if (dpsData.length === 0) {
         periodEl.textContent = '-';
-        startDpsEl.textContent = '기록 없음';
-        endDpsEl.textContent = '기록 없음';
+        startDpsEl.textContent = '湲곕줉 �놁쓬';
+        endDpsEl.textContent = '湲곕줉 �놁쓬';
         rateEl.textContent = '-';
         rateEl.className = 'kpi-trend';
         return;
     }
     
     if (dpsData.length === 1) {
-        periodEl.textContent = '1회 지급됨';
+        periodEl.textContent = '1�� 吏�湲됰맖';
         const item = dpsData[0];
         startDpsEl.textContent = formatCurrency(item.dps, item.currency);
         endDpsEl.textContent = formatCurrency(item.dps, item.currency);
-        rateEl.textContent = '추세 분석 불가 (최소 2회 필요)';
+        rateEl.textContent = '異붿꽭 遺꾩꽍 遺덇� (理쒖냼 2�� �꾩슂)';
         rateEl.className = 'kpi-trend';
         return;
     }
@@ -3568,7 +3857,7 @@ function updateDividendGrowthAnalysis() {
     const currency = firstItem.currency;
     
     const formatDate = (d) => `${d.getFullYear()}.${String(d.getMonth() + 1).padStart(2, '0')}`;
-    periodEl.textContent = `${formatDate(firstDate)} ~ ${formatDate(lastDate)} (${Math.round(daysDiff)}일)`;
+    periodEl.textContent = `${formatDate(firstDate)} ~ ${formatDate(lastDate)} (${Math.round(daysDiff)}��)`;
     
     // Log-Linear Regression (OLS)
     // ln(DPS) = alpha + beta * t
@@ -3600,8 +3889,8 @@ function updateDividendGrowthAnalysis() {
     const dpsStartEst = Math.exp(alpha);
     const dpsEndEst = Math.exp(alpha + beta * totalYears);
     
-    startDpsEl.textContent = `${formatCurrency(dpsStartEst, currency)} (추세선)`;
-    endDpsEl.textContent = `${formatCurrency(dpsEndEst, currency)} (추세선)`;
+    startDpsEl.textContent = `${formatCurrency(dpsStartEst, currency)} (異붿꽭��)`;
+    endDpsEl.textContent = `${formatCurrency(dpsEndEst, currency)} (異붿꽭��)`;
     
     const totalGrowth = dpsStartEst > 0 ? ((dpsEndEst - dpsStartEst) / dpsStartEst) * 100 : 0;
     const cagr = (Math.exp(beta) - 1) * 100;
@@ -3611,9 +3900,9 @@ function updateDividendGrowthAnalysis() {
     const plClass = totalGrowth >= 0 ? 'positive' : 'negative';
     
     if (daysDiff < 90) {
-        rateEl.textContent = `${sign}${totalGrowth.toFixed(2)}% (단기 추세 성장률)`;
+        rateEl.textContent = `${sign}${totalGrowth.toFixed(2)}% (�④린 異붿꽭 �깆옣瑜�)`;
     } else {
-        rateEl.textContent = `${sign}${totalGrowth.toFixed(1)}% (연평균 CAGR: ${cagrSign}${cagr.toFixed(2)}%)`;
+        rateEl.textContent = `${sign}${totalGrowth.toFixed(1)}% (�고룊洹� CAGR: ${cagrSign}${cagr.toFixed(2)}%)`;
     }
     rateEl.className = `kpi-trend ${plClass}`;
 }
@@ -3625,9 +3914,9 @@ function getValInStockCurrency(amountInActiveCurrency, stockCurrency) {
     if (activeCurrency === stockCurrency) return amountInActiveCurrency;
     
     if (activeCurrency === 'KRW' && stockCurrency === 'USD') {
-        return amountInActiveCurrency / (state.currentExchangeRate || FALLBACK_EXCHANGE_RATE);
+        return core.isPositiveNumber(state.currentExchangeRate) ? amountInActiveCurrency / state.currentExchangeRate : null;
     } else {
-        return amountInActiveCurrency * (state.currentExchangeRate || FALLBACK_EXCHANGE_RATE);
+        return core.isPositiveNumber(state.currentExchangeRate) ? amountInActiveCurrency * state.currentExchangeRate : null;
     }
 }
 
@@ -3735,24 +4024,24 @@ function runTrendForecasting() {
     }
     
     // 4. Render Trend Increment
-    trendIncrementEl.textContent = `+${formatCurrency(delta)} / 월`;
+    trendIncrementEl.textContent = `+${formatCurrency(delta)} / ��`;
     
     // 5. Update labels dynamically depending on selected basis
     const labelEl = document.getElementById('fcTrendLabel');
     if (labelEl) {
         if (basis === 'actual') {
-            labelEl.textContent = '최근 3개월간 배당 실수령액 증가추세 (월평균)';
+            labelEl.textContent = '理쒓렐 3媛쒖썡媛� 諛곕떦 �ㅼ닔�뱀븸 利앷�異붿꽭 (�뷀룊洹�)';
         } else {
-            labelEl.textContent = '최근 3개월간 배당 체력(배당력) 증가추세 (월평균)';
+            labelEl.textContent = '理쒓렐 3媛쒖썡媛� 諛곕떦 泥대젰(諛곕떦��) 利앷�異붿꽭 (�뷀룊洹�)';
         }
     }
 
     const descEl = document.querySelector('#fcTrendIncrement + p');
     if (descEl) {
         if (basis === 'actual') {
-            descEl.textContent = '* 최근 3개월간 실제 수령한 총 배당금의 월평균 증가율을 바탕으로 미래 배당 현금 흐름을 선형으로 예측합니다. (지급 주기에 따른 월별 변동성이 반영될 수 있습니다.)';
+            descEl.textContent = '* 理쒓렐 3媛쒖썡媛� �ㅼ젣 �섎졊�� 珥� 諛곕떦湲덉쓽 �뷀룊洹� 利앷��⑥쓣 諛뷀깢�쇰줈 誘몃옒 諛곕떦 �꾧툑 �먮쫫�� �좏삎�쇰줈 �덉륫�⑸땲��. (吏�湲� 二쇨린�� �곕Ⅸ �붾퀎 蹂��숈꽦�� 諛섏쁺�� �� �덉뒿�덈떎.)';
         } else {
-            descEl.textContent = '* 최근 3개월 동안 매수 등을 통해 포트폴리오의 월배당 생성 능력(배당력)이 매달 평균적으로 얼마나 증가했는지를 바탕으로 선형 예측합니다.';
+            descEl.textContent = '* 理쒓렐 3媛쒖썡 �숈븞 留ㅼ닔 �깆쓣 �듯빐 �ы듃�대━�ㅼ쓽 �붾같�� �앹꽦 �λ젰(諛곕떦��)�� 留ㅻ떖 �됯퇏�곸쑝濡� �쇰쭏�� 利앷��덈뒗吏�瑜� 諛뷀깢�쇰줈 �좏삎 �덉륫�⑸땲��.';
         }
     }
     
@@ -3776,7 +4065,7 @@ function runTrendForecasting() {
         const row = document.createElement('tr');
         row.style.borderBottom = '1px solid var(--border-color)';
         row.innerHTML = `
-            <td style="padding: 0.4rem 0;">${m}개월 후</td>
+            <td style="padding: 0.4rem 0;">${m}媛쒖썡 ��</td>
             <td style="padding: 0.4rem 0; text-align: right; font-weight: 600; color: var(--primary);">${formatCurrency(projectedVal)}</td>
         `;
         tbody.appendChild(row);
@@ -3784,7 +4073,7 @@ function runTrendForecasting() {
 }
 
 // ============================================================================
-// AI 어시스턴트 챗봇 기능 (Gemini API 연동)
+// AI �댁떆�ㅽ꽩�� 梨쀫큸 湲곕뒫 (Gemini API �곕룞)
 // ============================================================================
 function setupAIChat() {
     const btnOpen = document.getElementById('btnOpenAIChat');
@@ -3808,10 +4097,10 @@ function setupAIChat() {
         inputKey.value = key;
         if (key) {
             statusDot.className = 'status-dot online';
-            statusDot.title = 'API 키가 설정되었습니다 (온라인)';
+            statusDot.title = 'API �ㅺ� �ㅼ젙�섏뿀�듬땲�� (�⑤씪��)';
         } else {
             statusDot.className = 'status-dot offline';
-            statusDot.title = 'API 키 미설정 (오프라인)';
+            statusDot.title = 'API �� 誘몄꽕�� (�ㅽ봽�쇱씤)';
         }
     };
     loadApiKey();
@@ -3843,16 +4132,17 @@ function setupAIChat() {
         localStorage.setItem('dividend_tracker_gemini_key', key);
         loadApiKey();
         overlay.style.display = 'none';
-        showToast('Gemini API Key가 저장되었습니다.', 'success');
+        showToast('Gemini API Key媛� ���λ릺�덉뒿�덈떎.', 'success');
         
-        appendMessage('system', 'API Key가 성공적으로 업데이트되었습니다. 이제 분석을 시작할 수 있습니다!');
+        appendMessage('system', 'API Key媛� �깃났�곸쑝濡� �낅뜲�댄듃�섏뿀�듬땲��. �댁젣 遺꾩꽍�� �쒖옉�� �� �덉뒿�덈떎!');
     });
 
     // Chat Message append helper
     const appendMessage = (sender, text) => {
         const msgDiv = document.createElement('div');
         msgDiv.className = `chat-message ${sender}`;
-        msgDiv.innerHTML = text.replace(/\n/g, '<br>');
+        msgDiv.textContent = text;
+        msgDiv.style.whiteSpace = 'pre-wrap';
         messagesContainer.appendChild(msgDiv);
         messagesContainer.scrollTop = messagesContainer.scrollHeight;
         return msgDiv;
@@ -3861,14 +4151,15 @@ function setupAIChat() {
     // Construct the LLM Context Prompt
     const buildPromptContext = () => {
         const activeCurrency = state.activeCurrency || 'KRW';
-        const exchangeRate = state.currentExchangeRate || 1535;
+        const exchangeRate = state.currentExchangeRate || '誘몄“��';
+        const safeAccounts = state.accounts.map(({ id, name, type }) => ({ id, name, type }));
 
         // Simplify portfolio and logs for context window optimization
         const simplifiedPortfolio = state.portfolio.map(s => {
             const acc = state.accounts.find(a => a.id === s.accountId);
             return {
                 id: s.id,
-                account: acc ? acc.name : '미지정',
+                account: acc ? acc.name : '誘몄���',
                 name: s.name,
                 ticker: s.ticker,
                 shares: s.shares,
@@ -3882,44 +4173,44 @@ function setupAIChat() {
             const stock = state.portfolio.find(p => p.id === l.portfolioId);
             return {
                 date: l.date,
-                ticker: stock ? stock.ticker : '기타',
-                name: stock ? stock.name : '기타',
+                ticker: stock ? stock.ticker : '湲고�',
+                name: stock ? stock.name : '湲고�',
                 amount: l.amount,
                 currency: l.currency,
                 amountKRW: l.amountKRW
             };
         });
 
-        return `역할: 배당 성장 투자 전문 금융 AI 어시스턴트
-사용자의 언어: 한국어
+        return `��븷: 諛곕떦 �깆옣 �ъ옄 �꾨Ц 湲덉쑖 AI �댁떆�ㅽ꽩��
+�ъ슜�먯쓽 �몄뼱: �쒓뎅��
 
-현재 사용자의 포트폴리오 데이터 정보:
-- 표시 통화: ${activeCurrency}
-- 적용 환율: ${exchangeRate} KRW/USD
-- 등록 계좌 목록: ${JSON.stringify(state.accounts)}
-- 보유 주식 포트폴리오: ${JSON.stringify(simplifiedPortfolio)}
-- 최근 15개 배당금 수령 내역: ${JSON.stringify(simplifiedLogs)}
+�꾩옱 �ъ슜�먯쓽 �ы듃�대━�� �곗씠�� �뺣낫:
+- �쒖떆 �듯솕: ${activeCurrency}
+- �곸슜 �섏쑉: ${exchangeRate} KRW/USD
+- �깅줉 怨꾩쥖 紐⑸줉: ${JSON.stringify(safeAccounts)}
+- 蹂댁쑀 二쇱떇 �ы듃�대━��: ${JSON.stringify(simplifiedPortfolio)}
+- 理쒓렐 15媛� 諛곕떦湲� �섎졊 �댁뿭: ${JSON.stringify(simplifiedLogs)}
 
-미션:
-1. 사용자의 배당 현황 분석, 특정 종목 추천, 예상 배당 및 포트폴리오 조언 요구에 상세하게 답합니다.
-2. 만약 사용자가 대화로 새로운 주식 취득이나 배당금 수령을 기록해달라고 요청할 경우(예: "오늘 SCHD 10주 78달러에 샀어 기록해줘" 또는 "어제 리얼티인컴 배당 세전 39달러 받았어 적어줘"), 해당 명령을 실제 포트폴리오 앱에 기록하기 위해 답변 가장 마지막 줄에 정확한 양식의 JSON 액션 블록을 유일하게 포함시켜야 합니다.
+誘몄뀡:
+1. �ъ슜�먯쓽 諛곕떦 �꾪솴 遺꾩꽍, �뱀젙 醫낅ぉ 異붿쿇, �덉긽 諛곕떦 諛� �ы듃�대━�� 議곗뼵 �붽뎄�� �곸꽭�섍쾶 �듯빀�덈떎.
+2. 留뚯빟 �ъ슜�먭� ���붾줈 �덈줈�� 二쇱떇 痍⑤뱷�대굹 諛곕떦湲� �섎졊�� 湲곕줉�대떖�쇨퀬 �붿껌�� 寃쎌슦(��: "�ㅻ뒛 SCHD 10二� 78�щ윭�� ���� 湲곕줉�댁쨾" �먮뒗 "�댁젣 由ъ뼹�곗씤而� 諛곕떦 �몄쟾 39�щ윭 諛쏆븯�� �곸뼱以�"), �대떦 紐낅졊�� �ㅼ젣 �ы듃�대━�� �깆뿉 湲곕줉�섍린 �꾪빐 �듬� 媛��� 留덉�留� 以꾩뿉 �뺥솗�� �묒떇�� JSON �≪뀡 釉붾줉�� �좎씪�섍쾶 �ы븿�쒖폒�� �⑸땲��.
 
-액션 가능한 JSON 포맷 종류 (답변 맨 마지막 줄에 단 하나만 출력해야 함):
-1. 추가 매수 기록 (buy_more):
+�≪뀡 媛��ν븳 JSON �щ㎎ 醫낅쪟 (�듬� 留� 留덉�留� 以꾩뿉 �� �섎굹留� 異쒕젰�댁빞 ��):
+1. 異붽� 留ㅼ닔 湲곕줉 (buy_more):
 {"action": "buy_more", "ticker": "SCHD", "shares": 10, "price": 78.2, "date": "2026-06-28"}
 
-2. 배당금 수령 기록 (record_dividend):
+2. 諛곕떦湲� �섎졊 湲곕줉 (record_dividend):
 {"action": "record_dividend", "ticker": "O", "amount": 39.0, "tax": 5.85, "date": "2026-06-28", "currency": "USD"}
 
-주의사항: 
-- JSON 액션 포맷을 출력할 때는 사용자가 명확하게 '기록해줘', '적어줘', '반영해줘'라고 지시했을 때만 사용합니다.
-- 날짜(date)가 없으면 오늘 날짜(현지 기준: ${new Date().toISOString().split('T')[0]})로 기본 기입합니다.
-- 종목은 사용자가 제공한 한글명이나 티커를 활용해 포트폴리오에서 매칭하십시오.
-- 답변은 전문적이고 친근한 어조로 작성해 주세요.`;
+二쇱쓽�ы빆: 
+- JSON �≪뀡 �щ㎎�� 異쒕젰�� �뚮뒗 �ъ슜�먭� 紐낇솗�섍쾶 '湲곕줉�댁쨾', '�곸뼱以�', '諛섏쁺�댁쨾'�쇨퀬 吏��쒗뻽�� �뚮쭔 �ъ슜�⑸땲��.
+- �좎쭨(date)媛� �놁쑝硫� �ㅻ뒛 �좎쭨(�꾩� 湲곗�: ${core.localDateString()})濡� 湲곕낯 湲곗엯�⑸땲��.
+- 醫낅ぉ�� �ъ슜�먭� �쒓났�� �쒓�紐낆씠�� �곗빱瑜� �쒖슜�� �ы듃�대━�ㅼ뿉�� 留ㅼ묶�섏떗�쒖삤.
+- �듬��� �꾨Ц�곸씠怨� 移쒓렐�� �댁“濡� �묒꽦�� 二쇱꽭��.`;
     };
 
     // Process LLM Response JSON Action
-    const parseAndExecuteAction = (text) => {
+    const parseAndExecuteAction = async (text) => {
         // Find JSON block in response
         const jsonMatch = text.match(/\{"action"\s*:\s*"[^"]+".*?\}/s);
         if (!jsonMatch) return null;
@@ -3931,10 +4222,10 @@ function setupAIChat() {
                 const { ticker, shares, price, date } = actionData;
                 const stock = state.portfolio.find(p => p.ticker.toUpperCase() === ticker.toUpperCase() || p.name.includes(ticker));
                 if (!stock) {
-                    return `⚠️ 포트폴리오에 등록되지 않은 종목(${ticker})입니다. 추가 매수를 기록하려면 먼저 자산관리 메뉴에서 해당 종목을 포트폴리오에 추가해 주세요.`;
+                    return `�좑툘 �ы듃�대━�ㅼ뿉 �깅줉�섏� �딆� 醫낅ぉ(${ticker})�낅땲��. 異붽� 留ㅼ닔瑜� 湲곕줉�섎젮硫� 癒쇱� �먯궛愿�由� 硫붾돱�먯꽌 �대떦 醫낅ぉ�� �ы듃�대━�ㅼ뿉 異붽��� 二쇱꽭��.`;
                 }
 
-                const buyDate = date || new Date().toISOString().split('T')[0];
+                const buyDate = date || core.localDateString();
                 const currentShares = stock.shares;
                 const newTotalShares = currentShares + parseFloat(shares);
                 
@@ -3959,22 +4250,33 @@ function setupAIChat() {
                 
                 saveState();
                 renderAll();
-                return `✅ **자동 추가매수 기입 성공**\n종목: ${stock.name} (${stock.ticker})\n추가 수량: +${shares}주 (총 보유: ${newTotalShares}주)\n수정된 평단가: ${formatCurrency(stock.avgPrice, stock.currency)}`;
+                return `�� **�먮룞 異붽�留ㅼ닔 湲곗엯 �깃났**\n醫낅ぉ: ${stock.name} (${stock.ticker})\n異붽� �섎웾: +${shares}二� (珥� 蹂댁쑀: ${newTotalShares}二�)\n�섏젙�� �됰떒媛�: ${formatCurrency(stock.avgPrice, stock.currency)}`;
             }
 
             if (actionData.action === 'record_dividend') {
                 const { ticker, amount, tax, date, currency } = actionData;
                 const stock = state.portfolio.find(p => p.ticker.toUpperCase() === ticker.toUpperCase() || p.name.includes(ticker));
                 if (!stock) {
-                    return `⚠️ 포트폴리오에 등록되지 않은 종목(${ticker})입니다. 배당을 수령하려면 종목이 먼저 포트폴리오에 추가되어 있어야 합니다.`;
+                    return `�좑툘 �ы듃�대━�ㅼ뿉 �깅줉�섏� �딆� 醫낅ぉ(${ticker})�낅땲��. 諛곕떦�� �섎졊�섎젮硫� 醫낅ぉ�� 癒쇱� �ы듃�대━�ㅼ뿉 異붽��섏뼱 �덉뼱�� �⑸땲��.`;
                 }
 
-                const logDate = date || new Date().toISOString().split('T')[0];
+                const logDate = date || core.localDateString();
                 const logCurrency = currency || stock.currency;
                 const logTax = parseFloat(tax) || 0;
                 const logAmount = parseFloat(amount);
                 
-                const rate = logCurrency === 'USD' ? (state.currentExchangeRate || FALLBACK_EXCHANGE_RATE) : 1;
+                let rate = 1;
+                let rateDate = logDate;
+                let rateSource = 'not-applicable';
+                if (logCurrency === 'USD') {
+                    const rateResult = await getHistoricalExchangeRate(logDate);
+                    if (!rateResult.ok) {
+                        return `�좑툘 ${logDate} 怨쇨굅 �섏쑉�� �뺤젙�섏� 紐삵빐 諛곕떦 湲곕줉�� ���ν븯吏� �딆븯�듬땲��. �쇰컲 諛곕떦 �낅젰 李쎌뿉�� �섏쑉�� 吏곸젒 �뺤씤�� 二쇱꽭��.`;
+                    }
+                    rate = rateResult.rate;
+                    rateDate = rateResult.rateDate;
+                    rateSource = rateResult.source;
+                }
                 const amountKRW = logCurrency === 'USD' ? logAmount * rate : logAmount;
 
                 const newLog = {
@@ -3985,18 +4287,24 @@ function setupAIChat() {
                     tax: logTax,
                     currency: logCurrency,
                     exchangeRate: rate,
-                    amountKRW: amountKRW
+                    amountKRW: amountKRW,
+                    netAmount: logAmount - logTax,
+                    netAmountKRW: amountKRW - (logTax * rate),
+                    exchangeRateDate: rateDate,
+                    exchangeRateRequestedDate: logDate,
+                    exchangeRateSource: rateSource,
+                    exchangeRateIsFallback: false
                 };
                 state.dividendLogs.push(newLog);
                 state.dividendLogs.sort((a, b) => new Date(b.date) - new Date(a.date));
                 
                 saveState();
                 renderAll();
-                return `✅ **자동 배당수령 기입 성공**\n종목: ${stock.name} (${stock.ticker})\n수령 배당금: ${formatCurrency(logAmount, logCurrency)} (세전)\n수령 기준일: ${logDate}`;
+                return `�� **�먮룞 諛곕떦�섎졊 湲곗엯 �깃났**\n醫낅ぉ: ${stock.name} (${stock.ticker})\n�섎졊 諛곕떦湲�: ${formatCurrency(logAmount, logCurrency)} (�몄쟾)\n�섎졊 湲곗���: ${logDate}`;
             }
         } catch (e) {
             console.error("Action execution error:", e);
-            return "⚠️ AI가 기입을 시도했으나 명령 형식이 올바르지 않아 반영하지 못했습니다.";
+            return "�좑툘 AI媛� 湲곗엯�� �쒕룄�덉쑝�� 紐낅졊 �뺤떇�� �щ컮瑜댁� �딆븘 諛섏쁺�섏� 紐삵뻽�듬땲��.";
         }
         return null;
     };
@@ -4015,12 +4323,12 @@ function setupAIChat() {
         // Retrieve API Key
         const apiKey = localStorage.getItem('dividend_tracker_gemini_key');
         if (!apiKey) {
-            appendMessage('ai', '죄송합니다. 배당 비서를 사용하려면 우상단의 **열쇠 아이콘**을 클릭해 **Google Gemini API Key**를 설정해 주셔야 합니다.');
+            appendMessage('ai', '二꾩넚�⑸땲��. 諛곕떦 鍮꾩꽌瑜� �ъ슜�섎젮硫� �곗긽�⑥쓽 **�댁뇿 �꾩씠肄�**�� �대┃�� **Google Gemini API Key**瑜� �ㅼ젙�� 二쇱뀛�� �⑸땲��.');
             return;
         }
 
         // Add typing indicator
-        const typingIndicator = appendMessage('ai', '비서가 생각 중입니다...');
+        const typingIndicator = appendMessage('ai', '鍮꾩꽌媛� �앷컖 以묒엯�덈떎...');
 
         try {
             const context = buildPromptContext();
@@ -4034,7 +4342,7 @@ function setupAIChat() {
                     contents: [
                         {
                             role: 'user',
-                            parts: [{ text: `${context}\n\n사용자 문의: ${userText}` }]
+                            parts: [{ text: `${context}\n\n�ъ슜�� 臾몄쓽: ${userText}` }]
                         }
                     ],
                     generationConfig: {
@@ -4044,11 +4352,11 @@ function setupAIChat() {
             });
 
             if (!response.ok) {
-                throw new Error('API 요청 실패');
+                throw new Error('API �붿껌 �ㅽ뙣');
             }
 
             const data = await response.json();
-            const rawText = data.candidates?.[0]?.content?.parts?.[0]?.text || '죄송합니다. 답변을 생성하지 못했습니다.';
+            const rawText = data.candidates?.[0]?.content?.parts?.[0]?.text || '二꾩넚�⑸땲��. �듬��� �앹꽦�섏� 紐삵뻽�듬땲��.';
 
             // Remove typing indicator
             messagesContainer.removeChild(typingIndicator);
@@ -4060,7 +4368,7 @@ function setupAIChat() {
             appendMessage('ai', cleanText);
 
             // Process and execute any parsed JSON action
-            const actionResult = parseAndExecuteAction(rawText);
+            const actionResult = await parseAndExecuteAction(rawText);
             if (actionResult) {
                 appendMessage('system', actionResult);
             }
@@ -4068,7 +4376,7 @@ function setupAIChat() {
         } catch (error) {
             console.error("AI Assistant Error:", error);
             messagesContainer.removeChild(typingIndicator);
-            appendMessage('ai', '⚠️ 서버와 통신하는 동안 에러가 발생했습니다. API 키가 유효한지 확인하고 잠시 후 다시 시도해 주세요.');
+            appendMessage('ai', '�좑툘 �쒕쾭�� �듭떊�섎뒗 �숈븞 �먮윭媛� 諛쒖깮�덉뒿�덈떎. API �ㅺ� �좏슚�쒖� �뺤씤�섍퀬 �좎떆 �� �ㅼ떆 �쒕룄�� 二쇱꽭��.');
         }
     };
 
@@ -4081,24 +4389,96 @@ function setupAIChat() {
 }
 
 // ============================================================================
-// PWA 서비스 워커 및 구글 드라이브 클라우드 동기화 기능
+// PWA �쒕퉬�� �뚯빱 諛� 援ш� �쒕씪�대툕 �대씪�곕뱶 �숆린�� 湲곕뒫
 // ============================================================================
 
-// PWA 서비스 워커 등록
+let pendingServiceWorker = null;
+
+function setupVersionUI() {
+    const versionEl = document.getElementById('appVersion');
+    const applyBtn = document.getElementById('btnApplyUpdate');
+    if (versionEl) versionEl.textContent = `踰꾩쟾 ${APP_VERSION}`;
+    if (applyBtn) {
+        applyBtn.addEventListener('click', () => {
+            if (pendingServiceWorker) pendingServiceWorker.postMessage({ type: 'SKIP_WAITING' });
+        });
+    }
+}
+
+function showServiceWorkerUpdate(worker) {
+    pendingServiceWorker = worker;
+    const applyBtn = document.getElementById('btnApplyUpdate');
+    if (applyBtn) applyBtn.style.display = 'inline-flex';
+}
+
+// PWA �쒕퉬�� �뚯빱 �깅줉
 if ('serviceWorker' in navigator) {
+    let reloadingForUpdate = false;
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+        if (reloadingForUpdate) return;
+        reloadingForUpdate = true;
+        window.location.reload();
+    });
     window.addEventListener('load', () => {
-        navigator.serviceWorker.register('./sw.js')
-            .then(() => console.log('[PWA] Service Worker registered successfully.'))
-            .catch(err => console.error('[PWA] Service Worker registration failed:', err));
+        navigator.serviceWorker.register('./sw.js').then(registration => {
+            if (registration.waiting) showServiceWorkerUpdate(registration.waiting);
+            registration.addEventListener('updatefound', () => {
+                const worker = registration.installing;
+                worker?.addEventListener('statechange', () => {
+                    if (worker.state === 'installed' && navigator.serviceWorker.controller) showServiceWorkerUpdate(worker);
+                });
+            });
+            return registration.update();
+        }).catch(err => console.error('[PWA] Service Worker registration failed:', err));
     });
 }
 
 let gDriveTokenClient = null;
 let gDriveAccessToken = null;
 let gDriveFileId = null;
+let gDriveTokenExpiresAt = 0;
+let gDriveInitialPullComplete = false;
+let gDrivePullInProgress = false;
+let gDrivePushChain = Promise.resolve();
+let gDrivePushQueued = false;
+let gDriveRemoteModifiedTime = null;
+let gDriveBaselineFingerprint = null;
+
+function fingerprintLedger(value) {
+    const comparable = {};
+    core.LEDGER_FIELDS.forEach(field => {
+        comparable[field] = Array.isArray(value?.[field]) ? value[field] : [];
+    });
+    const text = JSON.stringify(comparable);
+    let hash = 2166136261;
+    for (let index = 0; index < text.length; index++) {
+        hash ^= text.charCodeAt(index);
+        hash = Math.imul(hash, 16777619);
+    }
+    return (hash >>> 0).toString(16);
+}
+
+function preserveSyncConflict(localLedger, remoteLedger, reason) {
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    localStorage.setItem(`dividend_sync_conflict_local_${stamp}`, JSON.stringify(localLedger));
+    localStorage.setItem(`dividend_sync_conflict_remote_${stamp}`, JSON.stringify(remoteLedger));
+    const syncLog = document.getElementById('gDriveSyncLog');
+    if (syncLog) syncLog.textContent = `�숆린�� 異⑸룎 媛먯�: ${reason}. �묒そ �щ낯�� �� 釉뚮씪�곗��� 蹂댁〈�덉뒿�덈떎.`;
+    showToast('Drive �숆린�� 異⑸룎�� 媛먯��� �묒そ �щ낯�� 蹂댁〈�덉뒿�덈떎.', 'warning');
+}
+
+function queueGDrivePush() {
+    if (storageWriteBlocked || !gDriveAccessToken || !gDriveInitialPullComplete || gDrivePullInProgress || gDrivePushQueued) return;
+    gDrivePushQueued = true;
+    gDrivePushChain = gDrivePushChain.catch(() => {}).then(async () => {
+        gDrivePushQueued = false;
+        await pushStateToGDrive();
+    });
+}
 
 function setupGDriveSync() {
     const inputClientId = document.getElementById('gDriveClientId');
+    const inputWorkerUrl = document.getElementById('priceWorkerUrl');
     const btnSave = document.getElementById('btnSaveGDriveConfig');
     const btnLogin = document.getElementById('btnGDriveLogin');
     const btnLogout = document.getElementById('btnGDriveLogout');
@@ -4113,8 +4493,9 @@ function setupGDriveSync() {
     // Load saved settings
     const savedClientId = localStorage.getItem('gdrive_client_id') || '';
     inputClientId.value = savedClientId;
+    if (inputWorkerUrl) inputWorkerUrl.value = localStorage.getItem('price_worker_url') || '';
 
-    const updateUI = (isLoggedIn, accountText = '연동되어 있지 않음') => {
+    const updateUI = (isLoggedIn, accountText = '�곕룞�섏뼱 �덉� �딆쓬') => {
         if (isLoggedIn) {
             btnLogin.style.display = 'none';
             btnLogout.style.display = 'inline-flex';
@@ -4123,17 +4504,17 @@ function setupGDriveSync() {
             btnPush.disabled = false;
             if (statusDot) {
                 statusDot.className = 'status-dot online';
-                statusDot.title = `구글 연동됨 (${accountText})`;
+                statusDot.title = `援ш� �곕룞�� (${accountText})`;
             }
         } else {
             btnLogin.style.display = 'inline-flex';
             btnLogout.style.display = 'none';
-            txtAccount.textContent = '연동되어 있지 않음';
+            txtAccount.textContent = '�곕룞�섏뼱 �덉� �딆쓬';
             btnPull.disabled = true;
             btnPush.disabled = true;
             if (statusDot) {
                 statusDot.className = 'status-dot offline';
-                statusDot.title = '구글 미연동';
+                statusDot.title = '援ш� 誘몄뿰��';
             }
         }
     };
@@ -4151,15 +4532,17 @@ function setupGDriveSync() {
                 scope: 'https://www.googleapis.com/auth/drive.appdata',
                 callback: async (resp) => {
                     if (resp.error !== undefined) {
-                        showToast('구글 연동 실패: ' + resp.error, 'danger');
+                        showToast('援ш� �곕룞 �ㅽ뙣: ' + resp.error, 'danger');
                         updateUI(false);
-                        updateLog('연동 실패: ' + resp.error);
+                        updateLog('�곕룞 �ㅽ뙣: ' + resp.error);
                         return;
                     }
                     
                     gDriveAccessToken = resp.access_token;
+                    gDriveTokenExpiresAt = Date.now() + ((Number(resp.expires_in) || 3600) * 1000);
+                    gDriveInitialPullComplete = false;
                     localStorage.setItem('gdrive_logged_in', 'true');
-                    updateLog('인증 완료. API 라이브러리 로딩 중...');
+                    updateLog('�몄쬆 �꾨즺. API �쇱씠釉뚮윭由� 濡쒕뵫 以�...');
 
                     // Load gapi client
                     if (typeof gapi !== 'undefined') {
@@ -4169,17 +4552,22 @@ function setupGDriveSync() {
                                 await gapi.client.load('drive', 'v3');
                                 
                                 // Query drive info to fetch account name
-                                const about = await gapi.client.drive.about.get({ fields: 'user' });
-                                const email = about.result?.user?.emailAddress || '구글 계정';
+                                let email = '援ш� 怨꾩젙';
+                                try {
+                                    const about = await gapi.client.drive.about.get({ fields: 'user' });
+                                    email = about.result?.user?.emailAddress || email;
+                                } catch (aboutError) {
+                                    console.warn('Drive account label unavailable:', aboutError);
+                                }
                                 updateUI(true, email);
-                                updateLog('성공적으로 연동되었습니다.');
+                                updateLog('�깃났�곸쑝濡� �곕룞�섏뿀�듬땲��.');
                                 
                                 // Auto pull on first login
                                 await pullStateFromGDrive();
                             } catch (e) {
                                 console.error(e);
-                                updateUI(true, '연동 완료');
-                                updateLog('연동 성공 (계정 조회 제한됨)');
+                                updateUI(true, '�곕룞 �꾨즺');
+                                updateLog('�곕룞 �깃났 (怨꾩젙 議고쉶 �쒗븳��)');
                             }
                         });
                     }
@@ -4193,17 +4581,31 @@ function setupGDriveSync() {
     // Save Config
     btnSave.addEventListener('click', () => {
         const clientId = inputClientId.value.trim();
+        const workerUrl = inputWorkerUrl?.value.trim().replace(/\/$/, '') || '';
+        if (workerUrl) {
+            try {
+                const parsed = new URL(workerUrl);
+                if (parsed.protocol !== 'https:' && parsed.hostname !== 'localhost' && parsed.hostname !== '127.0.0.1') throw new Error();
+                localStorage.setItem('price_worker_url', workerUrl);
+            } catch (_) {
+                showToast('Worker 二쇱냼�� HTTPS URL�댁뼱�� �⑸땲��.', 'warning');
+                return;
+            }
+        } else {
+            localStorage.removeItem('price_worker_url');
+        }
         if (!clientId) {
             localStorage.removeItem('gdrive_client_id');
-            showToast('클라이언트 ID가 해제되었습니다.', 'success');
+            showToast('�� �ㅼ젙�� ���λ릺�덉뒿�덈떎.', 'success');
             updateUI(false);
+            document.querySelectorAll('.modal-backdrop').forEach(modal => modal.classList.remove('open'));
             return;
         }
 
         localStorage.setItem('gdrive_client_id', clientId);
         initTokenClient(clientId);
-        showToast('구글 클라이언트 ID가 저장되었습니다.', 'success');
-        updateLog('클라이언트 ID 저장됨. 로그인을 진행해 주세요.');
+        showToast('援ш� �대씪�댁뼵�� ID媛� ���λ릺�덉뒿�덈떎.', 'success');
+        updateLog('�대씪�댁뼵�� ID ���λ맖. 濡쒓렇�몄쓣 吏꾪뻾�� 二쇱꽭��.');
         document.querySelectorAll('.modal-backdrop').forEach(modal => modal.classList.remove('open'));
     });
 
@@ -4211,7 +4613,7 @@ function setupGDriveSync() {
     btnLogin.addEventListener('click', () => {
         const clientId = localStorage.getItem('gdrive_client_id');
         if (!clientId) {
-            alert('구글 로그인 전 1단계에서 Client ID를 먼저 설정하고 설정 완료 버튼을 눌러주세요.');
+            alert('援ш� 濡쒓렇�� �� 1�④퀎�먯꽌 Client ID瑜� 癒쇱� �ㅼ젙�섍퀬 �ㅼ젙 �꾨즺 踰꾪듉�� �뚮윭二쇱꽭��.');
             return;
         }
         if (!gDriveTokenClient) {
@@ -4220,7 +4622,7 @@ function setupGDriveSync() {
         if (gDriveTokenClient) {
             gDriveTokenClient.requestAccessToken({ prompt: 'consent' });
         } else {
-            alert('구글 API가 아직 준비되지 않았습니다. 잠시 후 다시 시도해 주세요.');
+            alert('援ш� API媛� �꾩쭅 以�鍮꾨릺吏� �딆븯�듬땲��. �좎떆 �� �ㅼ떆 �쒕룄�� 二쇱꽭��.');
         }
     });
 
@@ -4230,11 +4632,13 @@ function setupGDriveSync() {
             google.accounts.oauth2.revoke(gDriveAccessToken);
         }
         gDriveAccessToken = null;
+        gDriveTokenExpiresAt = 0;
+        gDriveInitialPullComplete = false;
         gDriveFileId = null;
         localStorage.removeItem('gdrive_logged_in');
         updateUI(false);
-        updateLog('연동이 해제되었습니다.');
-        showToast('구글 계정 연동을 해제했습니다.', 'success');
+        updateLog('�곕룞�� �댁젣�섏뿀�듬땲��.');
+        showToast('援ш� 怨꾩젙 �곕룞�� �댁젣�덉뒿�덈떎.', 'success');
     });
 
     // Manual PULL
@@ -4244,7 +4648,8 @@ function setupGDriveSync() {
 
     // Manual PUSH
     btnPush.addEventListener('click', async () => {
-        await pushStateToGDrive();
+        queueGDrivePush();
+        await gDrivePushChain;
     });
 
     // Auto-initialize on load if client ID exists
@@ -4264,7 +4669,7 @@ function setupGDriveSync() {
             setTimeout(() => {
                 initTokenClient(savedClientId);
                 if (localStorage.getItem('gdrive_logged_in') === 'true' && gDriveTokenClient) {
-                    updateLog('자동 연동 재연결 중...');
+                    updateLog('�먮룞 �곕룞 �ъ뿰寃� 以�...');
                     gDriveTokenClient.requestAccessToken({ prompt: '' }); // Silent token request
                 }
             }, 1000);
@@ -4274,148 +4679,126 @@ function setupGDriveSync() {
 
 // Push local state to Google Drive (Auto-save)
 async function pushStateToGDrive() {
-    if (!gDriveAccessToken) return;
-
+    if (storageWriteBlocked || !gDriveAccessToken || !gDriveInitialPullComplete || gDrivePullInProgress) return;
+    const syncLog = document.getElementById('gDriveSyncLog');
     try {
-        const boundary = 'foo_bar_baz';
-        const delimiter = "\r\n--" + boundary + "\r\n";
-        const close_delim = "\r\n--" + boundary + "--";
-        
-        const metadata = {
-            'name': 'portfolio_state.json',
-            'mimeType': 'application/json'
-        };
-        
-        const data = JSON.stringify(state, null, 2);
-        const syncLog = document.getElementById('gDriveSyncLog');
-        
-        if (syncLog) syncLog.textContent = '클라우드에 저장 중...';
+        if (gDriveTokenExpiresAt && Date.now() >= gDriveTokenExpiresAt) throw new Error('�몄쬆 �좏겙 留뚮즺. �ㅼ떆 濡쒓렇�명빐 二쇱꽭��.');
+        if (syncLog) syncLog.textContent = '�대씪�곕뱶�� �λ� ���� 以�...';
+        const ledger = core.createCloudLedgerSnapshot(state);
 
-        // Search for existing file first if fileId is not cached
-        if (!gDriveFileId && typeof gapi !== 'undefined' && gapi.client && gapi.client.drive) {
-            try {
-                const response = await gapi.client.drive.files.list({
-                    spaces: 'appDataFolder',
-                    q: "name = 'portfolio_state.json'",
-                    fields: 'files(id, name)',
-                    pageSize: 1
-                });
-                const files = response.result.files;
-                if (files && files.length > 0) {
-                    gDriveFileId = files[0].id;
-                }
-            } catch (e) {
-                console.error("Error listing files on push:", e);
+        if (!gDriveFileId) {
+            const response = await gapi.client.drive.files.list({
+                spaces: 'appDataFolder', q: "name = 'portfolio_state.json'",
+                fields: 'files(id, name, modifiedTime)', pageSize: 1
+            });
+            const remote = response.result.files?.[0];
+            if (remote) {
+                gDriveFileId = remote.id;
+                gDriveRemoteModifiedTime = remote.modifiedTime || null;
+            }
+        } else if (gDriveRemoteModifiedTime) {
+            const current = await gapi.client.drive.files.get({ fileId: gDriveFileId, fields: 'id, modifiedTime' });
+            const currentModified = current.result?.modifiedTime || null;
+            if (currentModified && currentModified !== gDriveRemoteModifiedTime) {
+                const remoteRes = await fetchJsonWithTimeout(`https://www.googleapis.com/drive/v3/files/${gDriveFileId}?alt=media`, {
+                    headers: { 'Authorization': 'Bearer ' + gDriveAccessToken }
+                }, 10000);
+                preserveSyncConflict(ledger, remoteRes.data, '�ㅻⅨ 湲곌린�먯꽌 �뚯씪�� 蹂�寃쎈맖');
+                return;
             }
         }
 
-        let url = 'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart';
+        const boundary = 'dividend_dashboard_boundary';
+        const delimiter = `\r\n--${boundary}\r\n`;
+        const closeDelimiter = `\r\n--${boundary}--`;
+        const metadata = { name: 'portfolio_state.json', mimeType: 'application/json' };
+        let url = 'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,modifiedTime';
         let method = 'POST';
-
         if (gDriveFileId) {
-            url = `https://www.googleapis.com/upload/drive/v3/files/${gDriveFileId}?uploadType=multipart`;
+            url = `https://www.googleapis.com/upload/drive/v3/files/${gDriveFileId}?uploadType=multipart&fields=id,modifiedTime`;
             method = 'PATCH';
         } else {
             metadata.parents = ['appDataFolder'];
         }
-
-        const multipartRequestBody =
-            delimiter +
-            'Content-Type: application/json\r\n\r\n' +
-            JSON.stringify(metadata) +
-            delimiter +
-            'Content-Type: application/json\r\n\r\n' +
-            data +
-            close_delim;
-
-        const res = await fetch(url, {
-            method: method,
+        const body = delimiter + 'Content-Type: application/json\r\n\r\n' + JSON.stringify(metadata) +
+            delimiter + 'Content-Type: application/json\r\n\r\n' + JSON.stringify(ledger, null, 2) + closeDelimiter;
+        const { response, data: file } = await fetchJsonWithTimeout(url, {
+            method,
             headers: {
                 'Authorization': 'Bearer ' + gDriveAccessToken,
-                'Content-Type': 'multipart/related; boundary=' + boundary
+                'Content-Type': `multipart/related; boundary=${boundary}`
             },
-            body: multipartRequestBody
-        });
-
-        if (!res.ok) {
-            const errorText = await res.text();
-            console.error("GDrive upload failed details:", res.status, errorText);
-            throw new Error(`클라우드 업로드 실패 (${res.status}): ${errorText}`);
-        }
-
-        const file = await res.json();
-        if (file.id) {
-            gDriveFileId = file.id;
-        }
-
-        const timeStr = new Date().toLocaleTimeString();
-        if (syncLog) syncLog.textContent = `구글 드라이브 실시간 저장 완료 (${timeStr})`;
+            body
+        }, 15000);
+        if (!response.ok) throw new Error(`�대씪�곕뱶 �낅줈�� �ㅽ뙣 (${response.status})`);
+        gDriveFileId = file.id || gDriveFileId;
+        gDriveRemoteModifiedTime = file.modifiedTime || gDriveRemoteModifiedTime;
+        gDriveBaselineFingerprint = fingerprintLedger(ledger);
+        if (syncLog) syncLog.textContent = `理쒓렐 �λ� ����: ${new Date().toLocaleTimeString()}`;
     } catch (err) {
-        console.error('GDrive push error:', err);
-        const syncLog = document.getElementById('gDriveSyncLog');
-        if (syncLog) syncLog.textContent = '저장 실패: ' + err.message;
+        if (/401|�좏겙 留뚮즺/.test(err.message)) {
+            gDriveAccessToken = null;
+            gDriveInitialPullComplete = false;
+        }
+        if (syncLog) syncLog.textContent = '���� �ㅽ뙣: ' + err.message;
     }
 }
 
 // Pull cloud state from Google Drive and merge
 async function pullStateFromGDrive() {
-    if (!gDriveAccessToken) return;
-
+    if (!gDriveAccessToken || storageWriteBlocked) return;
+    const syncLog = document.getElementById('gDriveSyncLog');
+    gDrivePullInProgress = true;
+    let pullSucceeded = false;
     try {
-        const syncLog = document.getElementById('gDriveSyncLog');
-        if (syncLog) syncLog.textContent = '클라우드 데이터 조회 중...';
-
+        if (syncLog) syncLog.textContent = '�대씪�곕뱶 �곗씠�� 議고쉶 以�...';
         const response = await gapi.client.drive.files.list({
             spaces: 'appDataFolder',
             q: "name = 'portfolio_state.json'",
-            fields: 'files(id, name)',
+            fields: 'files(id, name, modifiedTime)',
             pageSize: 1
         });
-
         const files = response.result.files;
         if (!files || files.length === 0) {
-            if (syncLog) syncLog.textContent = '클라우드 데이터 없음. 로컬 데이터로 파일 생성 중...';
+            if (syncLog) syncLog.textContent = '�대씪�곕뱶 �곗씠�� �놁쓬. 濡쒖뺄 �곗씠�곕줈 �뚯씪 �앹꽦 以�...';
+            gDriveInitialPullComplete = true;
+            gDrivePullInProgress = false;
             await pushStateToGDrive();
+            pullSucceeded = true;
             return;
         }
-
         gDriveFileId = files[0].id;
-
-        const fileRes = await fetch(`https://www.googleapis.com/drive/v3/files/${gDriveFileId}?alt=media`, {
-            headers: {
-                'Authorization': 'Bearer ' + gDriveAccessToken
-            }
-        });
-
-        if (!fileRes.ok) {
-            const errorText = await fileRes.text();
-            console.error("GDrive download failed details:", fileRes.status, errorText);
-            throw new Error(`파일 다운로드 에러 (${fileRes.status}): ${errorText}`);
-        }
-
-        const cloudState = await fileRes.json();
+        gDriveRemoteModifiedTime = files[0].modifiedTime || null;
+        const { response: fileRes, data: cloudState } = await fetchJsonWithTimeout(`https://www.googleapis.com/drive/v3/files/${gDriveFileId}?alt=media`, {
+            headers: { 'Authorization': 'Bearer ' + gDriveAccessToken }
+        }, 10000);
+        if (!fileRes.ok) throw new Error(`�뚯씪 �ㅼ슫濡쒕뱶 �먮윭 (${fileRes.status})`);
         if (cloudState && (cloudState.portfolio || cloudState.dividendLogs)) {
-            // Overwrite local state since cloud state is the central source of truth
-            state = { ...state, ...cloudState };
-            
-            // Temporarily disable auto-save callback during load to prevent infinite loop
-            const oldPush = gDriveAccessToken;
-            gDriveAccessToken = null;
-            
-            localStorage.setItem('dividend_tracker_state', JSON.stringify(state));
+            const localLedger = core.createCloudLedgerSnapshot(state);
+            const remoteFingerprint = fingerprintLedger(cloudState);
+            const localFingerprint = fingerprintLedger(localLedger);
+            if (localFingerprint !== remoteFingerprint && gDriveBaselineFingerprint && localFingerprint !== gDriveBaselineFingerprint) {
+                preserveSyncConflict(localLedger, cloudState, '濡쒖뺄怨� �먭꺽 �λ�媛� 紐⑤몢 蹂�寃쎈맖');
+                return;
+            }
+            if (!gDriveBaselineFingerprint && localFingerprint !== remoteFingerprint &&
+                (localLedger.accounts.length || localLedger.portfolio.length || localLedger.dividendLogs.length)) {
+                preserveSyncConflict(localLedger, cloudState, '泥� �숆린�� �� 濡쒖뺄 �λ��� �먭꺽 �λ�媛� �ㅻ쫫');
+            }
+            state = core.mergeCloudLedger(state, cloudState);
+            persistLocalState();
             renderAll();
-            
-            // Restore token
-            gDriveAccessToken = oldPush;
-
+            gDriveBaselineFingerprint = remoteFingerprint;
             const timeStr = new Date().toLocaleTimeString();
-            if (syncLog) syncLog.textContent = `최근 동기화: ${timeStr} (클라우드 데이터 로드 완료)`;
-            showToast('구글 드라이브 최신 데이터를 로컬에 동기화했습니다.', 'success');
+            if (syncLog) syncLog.textContent = `理쒓렐 �λ� 遺덈윭�ㅺ린: ${timeStr}`;
+            showToast('援ш� �쒕씪�대툕 �λ�瑜� �숆린�뷀뻽�듬땲��. �� 湲곌린�� �쒖꽭 罹먯떆�� �좎��덉뒿�덈떎.', 'success');
         }
+        pullSucceeded = true;
     } catch (err) {
-        console.error('GDrive pull error:', err);
-        const syncLog = document.getElementById('gDriveSyncLog');
-        if (syncLog) syncLog.textContent = '다운로드 실패: ' + err.message;
+        if (syncLog) syncLog.textContent = '�ㅼ슫濡쒕뱶 �ㅽ뙣: ' + err.message;
+    } finally {
+        gDrivePullInProgress = false;
+        if (pullSucceeded) gDriveInitialPullComplete = true;
     }
 }
 
@@ -4423,5 +4806,3 @@ async function pullStateFromGDrive() {
 document.addEventListener('DOMContentLoaded', () => {
     setupGDriveSync();
 });
-
-
