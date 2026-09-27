@@ -68,7 +68,7 @@ function loadState() {
                     localStorage.setItem('dividend_tracker_state_load_error', savedState);
                 }
             } catch (_) {}
-            showToast("���� �곗씠�곕� �쎌� 紐삵빐 �먮룞 ���κ낵 Drive �숆린�붾� 李⑤떒�덉뒿�덈떎. JSON 諛깆뾽 蹂듭썝 �먮뒗 珥덇린�붽� �꾩슂�⑸땲��.", "danger");
+            showToast("저장 데이터를 읽지 못해 자동 저장과 Drive 동기화를 차단했습니다. JSON 백업 복원 또는 초기화가 필요합니다.", "danger");
         }
     } else {
         // Load mock data if empty to give user a nice first impression
@@ -114,7 +114,7 @@ function checkMonthlyBackup() {
     if (state.lastBackupMonth !== currentMonthStr) {
         // Trigger auto backup file download
         exportDataJSON();
-        showToast("�덈줈�� �ъ씠 �쒖옉�섏뼱 �대쾲 �� �곗씠�� 諛깆뾽 �뚯씪�� �먮룞�쇰줈 �ㅼ슫濡쒕뱶�덉뒿�덈떎.", "success");
+        showToast("새로운 달이 시작되어 이번 달 데이터 백업 파일을 자동으로 다운로드했습니다.", "success");
         
         state.lastBackupMonth = currentMonthStr;
         saveState();
@@ -124,16 +124,16 @@ function checkMonthlyBackup() {
 // Mock Data for First Impression
 function loadMockData() {
     state.accounts = [
-        { id: 'acc-1', name: '�쇰컲 二쇱떇怨꾩쥖', type: 'General', accountNumber: '110-123-45678' },
-        { id: 'acc-2', name: 'ISA �덉꽭怨꾩쥖', type: 'ISA', accountNumber: '230-987-65432' },
-        { id: 'acc-3', name: '�곌툑��異뺢퀎醫�', type: 'Pension', accountNumber: '340-111-22222' }
+        { id: 'acc-1', name: '일반 주식계좌', type: 'General', accountNumber: '110-123-45678' },
+        { id: 'acc-2', name: 'ISA 절세계좌', type: 'ISA', accountNumber: '230-987-65432' },
+        { id: 'acc-3', name: '연금저축계좌', type: 'Pension', accountNumber: '340-111-22222' }
     ];
 
     state.portfolio = [
-        { id: 'port-1', accountId: 'acc-1', name: '由ъ뼹�곗씤而�', ticker: 'O', shares: 150, avgPrice: 55.4, currency: 'USD', annualDividend: 3.12, frequency: 'Monthly', exMonths: [1,2,3,4,5,6,7,8,9,10,11,12] },
+        { id: 'port-1', accountId: 'acc-1', name: '리얼티인컴', ticker: 'O', shares: 150, avgPrice: 55.4, currency: 'USD', annualDividend: 3.12, frequency: 'Monthly', exMonths: [1,2,3,4,5,6,7,8,9,10,11,12] },
         { id: 'port-2', accountId: 'acc-2', name: 'SCHD', ticker: 'SCHD', shares: 100, avgPrice: 78.2, currency: 'USD', annualDividend: 2.88, frequency: 'Quarterly', exMonths: [3,6,9,12] },
-        { id: 'port-3', accountId: 'acc-2', name: '�쇱꽦�꾩옄��', ticker: '005935', shares: 200, avgPrice: 62000, currency: 'KRW', annualDividend: 1444, frequency: 'Quarterly', exMonths: [4,5,8,11] }, // Samsung Ele Pref payout months roughly
-        { id: 'port-4', accountId: 'acc-3', name: '留μ옘由ъ씤�꾨씪', ticker: '088980', shares: 500, avgPrice: 12100, currency: 'KRW', annualDividend: 760, frequency: 'Semi-Annual', exMonths: [2, 8] }
+        { id: 'port-3', accountId: 'acc-2', name: '삼성전자우', ticker: '005935', shares: 200, avgPrice: 62000, currency: 'KRW', annualDividend: 1444, frequency: 'Quarterly', exMonths: [4,5,8,11] }, // Samsung Ele Pref payout months roughly
+        { id: 'port-4', accountId: 'acc-3', name: '맥쿼리인프라', ticker: '088980', shares: 500, avgPrice: 12100, currency: 'KRW', annualDividend: 760, frequency: 'Semi-Annual', exMonths: [2, 8] }
     ];
 
     // Log history (past 6 months)
@@ -210,7 +210,7 @@ async function updateCurrentExchangeRate() {
             const { response, data } = await fetchJsonWithTimeout('https://open.er-api.com/v6/latest/USD', {}, 8000);
             if (!response.ok) throw new Error(`HTTP ${response.status}`);
             const rate = Number(data?.rates?.KRW);
-            if (data?.result !== 'success' || !core.isPositiveNumber(rate)) throw new Error('KRW �섏쑉 媛� �꾨씫');
+            if (data?.result !== 'success' || !core.isPositiveNumber(rate)) throw new Error('KRW 환율 값 누락');
             const fetchedAt = new Date().toISOString();
             state.currentExchangeRate = rate;
             state.currentExchangeRateMeta = {
@@ -226,7 +226,7 @@ async function updateCurrentExchangeRate() {
             state.currentExchangeRateMeta = {
                 ...(state.currentExchangeRateMeta || {}),
                 status: 'error', rate: state.currentExchangeRate || null,
-                error: error?.name === 'AbortError' ? '�붿껌 �쒓컙 珥덇낵' : (error?.message || '議고쉶 �ㅽ뙣'),
+                error: error?.name === 'AbortError' ? '요청 시간 초과' : (error?.message || '조회 실패'),
                 lastAttemptAt: new Date().toISOString()
             };
             saveState({ sync: false });
@@ -241,14 +241,14 @@ async function updateCurrentExchangeRate() {
 
 // Fetch Historical Exchange Rate. Failure never pretends the current rate is historical.
 async function getHistoricalExchangeRate(dateStr) {
-    if (!dateStr) return { ok: false, error: '�좎쭨 �놁쓬', requestedDate: dateStr };
+    if (!dateStr) return { ok: false, error: '날짜 없음', requestedDate: dateStr };
     const cached = core.normalizeHistoricalRateEntry(state.exchangeRateCache[dateStr], dateStr);
     if (cached?.basisKnown) return { ok: true, cached: true, ...cached };
     try {
         const { response, data } = await fetchJsonWithTimeout(`https://api.frankfurter.dev/v1/${dateStr}?base=USD&symbols=KRW`, {}, 8000);
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const rate = Number(data?.rates?.KRW);
-        if (!core.isPositiveNumber(rate) || !/^\d{4}-\d{2}-\d{2}$/.test(data?.date || '')) throw new Error('�섏쑉 �먮뒗 湲곗��� �꾨씫');
+        if (!core.isPositiveNumber(rate) || !/^\d{4}-\d{2}-\d{2}$/.test(data?.date || '')) throw new Error('환율 또는 기준일 누락');
         const entry = {
             status: 'success', rate, requestedDate: dateStr, rateDate: data.date,
             source: 'Frankfurter v1', basisKnown: true, fetchedAt: new Date().toISOString()
@@ -260,7 +260,7 @@ async function getHistoricalExchangeRate(dateStr) {
         return {
             ok: false, requestedDate: dateStr,
             fallbackRate: core.isPositiveNumber(state.currentExchangeRate) ? state.currentExchangeRate : null,
-            error: error?.name === 'AbortError' ? '�붿껌 �쒓컙 珥덇낵' : (error?.message || '議고쉶 �ㅽ뙣')
+            error: error?.name === 'AbortError' ? '요청 시간 초과' : (error?.message || '조회 실패')
         };
     }
 }
@@ -304,11 +304,11 @@ async function fetchViaConfiguredWorker(symbol, currency) {
     if (!response.ok) throw new Error(`Worker HTTP ${response.status}`);
     const price = Number(data?.price);
     if (!core.validatePriceQuote({ price, symbol: data?.symbol, currency: data?.currency }, symbol, currency)) {
-        throw new Error('Worker �묐떟 寃�利� �ㅽ뙣');
+        throw new Error('Worker 응답 검증 실패');
     }
     return {
         price, currency, upstreamCurrency: data.currency || null, symbol,
-        provider: data.provider || '媛쒖씤 �쒖꽭 Worker', route: 'configured-worker',
+        provider: data.provider || '개인 시세 Worker', route: 'configured-worker',
         quoteTimestamp: data.quoteTimestamp || null, fetchedAt: new Date().toISOString()
     };
 }
@@ -339,7 +339,7 @@ async function fetchViaPublicProxies(targetUrl, symbol, currency) {
         if (!response.ok) throw new Error(`${route.name} HTTP ${response.status}`);
         const data = route.unwrap(raw);
         const quote = parseYahooQuote(data, currency, symbol, route.name);
-        if (!quote) throw new Error(`${route.name} 媛�寃� �꾨씫`);
+        if (!quote) throw new Error(`${route.name} 가격 누락`);
         return quote;
     };
     if (preferredRoute && routes[0]?.name === preferredRoute) {
@@ -355,7 +355,7 @@ async function fetchViaPublicProxies(targetUrl, symbol, currency) {
         localStorage.setItem('price_proxy_route', success.value.route);
         return success.value;
     }
-    throw new Error(settled.map(result => result.reason?.message).filter(Boolean).join(' / ') || '怨듦컻 寃쎈줈 �ㅽ뙣');
+    throw new Error(settled.map(result => result.reason?.message).filter(Boolean).join(' / ') || '공개 경로 실패');
 }
 
 // Fetch a single stock's current price.
@@ -370,7 +370,7 @@ async function fetchStockPrice(ticker, currency) {
                     return {
                         price: Number(data.price), currency: data.currency || currency,
                         upstreamCurrency: data.currency || null, symbol: ticker,
-                        provider: data.source || '濡쒖뺄 �쒖꽭 �쒕쾭', route: 'local-server',
+                        provider: data.source || '로컬 시세 서버', route: 'local-server',
                         quoteTimestamp: data.quoteTimestamp || null, fetchedAt: new Date().toISOString()
                     };
                 }
@@ -403,7 +403,7 @@ async function fetchStockPrice(ticker, currency) {
             errors.push(error.message);
         }
     }
-    throw new Error(errors.join(' / ') || '媛�寃� 議고쉶 �ㅽ뙣');
+    throw new Error(errors.join(' / ') || '가격 조회 실패');
 }
 
 async function refreshMarketData({ automatic = false } = {}) {
@@ -423,7 +423,7 @@ async function fetchAllStockPrices({ automatic = false } = {}) {
     const updateBtn = document.getElementById('btnUpdatePrices');
     if (updateBtn) {
         updateBtn.disabled = true;
-        updateBtn.innerHTML = '<i data-lucide="loader" style="width:14px;height:14px;animation:spin 1s linear infinite;"></i> 議고쉶 以�...';
+        updateBtn.innerHTML = '<i data-lucide="loader" style="width:14px;height:14px;animation:spin 1s linear infinite;"></i> 조회 중...';
     }
 
     const tickerMap = new Map();
@@ -451,12 +451,12 @@ async function fetchAllStockPrices({ automatic = false } = {}) {
                         ...(state.stockPrices[key] || {}),
                         currency: item.currency,
                         lastAttemptAt: startedAt,
-                        lastError: result.reason?.message || '議고쉶 �ㅽ뙣'
+                        lastError: result.reason?.message || '조회 실패'
                     };
                     failCount++;
                 }
             });
-            if (updateBtn) updateBtn.textContent = `議고쉶 以� (${completed}/${entries.length})...`;
+            if (updateBtn) updateBtn.textContent = `조회 중 (${completed}/${entries.length})...`;
             saveState({ sync: false });
         }
         const finishedAt = new Date().toISOString();
@@ -469,15 +469,15 @@ async function fetchAllStockPrices({ automatic = false } = {}) {
         if (successCount > 0) state.lastPriceUpdate = finishedAt;
         saveState({ sync: false });
         if (!automatic) {
-            if (failCount > 0 && successCount > 0) showToast(`${successCount}媛� �깃났, ${failCount}媛� �ㅽ뙣. 留덉�留� �뺤긽 媛�寃⑹� 蹂댁〈�덉뒿�덈떎.`, 'warning');
-            else if (failCount > 0) showToast('紐⑤뱺 �꾩옱媛� 議고쉶�� �ㅽ뙣�덉뒿�덈떎. 留덉�留� �뺤긽 媛�寃⑹� 蹂댁〈�덉뒿�덈떎.', 'danger');
-            else showToast(`${successCount}媛� 醫낅ぉ �꾩옱媛�媛� �낅뜲�댄듃�섏뿀�듬땲��.`, 'success');
+            if (failCount > 0 && successCount > 0) showToast(`${successCount}개 성공, ${failCount}개 실패. 마지막 정상 가격은 보존했습니다.`, 'warning');
+            else if (failCount > 0) showToast('모든 현재가 조회에 실패했습니다. 마지막 정상 가격은 보존했습니다.', 'danger');
+            else showToast(`${successCount}개 종목 현재가가 업데이트되었습니다.`, 'success');
         }
         return { successCount, failCount };
     } finally {
         if (updateBtn) {
             updateBtn.disabled = false;
-            updateBtn.innerHTML = '<i data-lucide="refresh-cw" style="width:14px;height:14px;"></i> �꾩옱媛� �낅뜲�댄듃';
+            updateBtn.innerHTML = '<i data-lucide="refresh-cw" style="width:14px;height:14px;"></i> 현재가 업데이트';
             if (window.lucide) lucide.createIcons();
         }
         updatePriceTimestamp();
@@ -514,13 +514,13 @@ function hasAnyPrice(stock) {
 
 function formatPriceQuoteMeta(stock) {
     const entry = getStockPriceData(stock);
-    if (!entry || !core.isPositiveNumber(entry.price)) return entry?.lastError ? '<small class="quote-status failed">議고쉶 �ㅽ뙣</small>' : '';
+    if (!entry || !core.isPositiveNumber(entry.price)) return entry?.lastError ? '<small class="quote-status failed">조회 실패</small>' : '';
     const freshness = core.getPriceFreshness(entry);
     const timestamp = entry.quoteTimestamp || entry.fetchedAt || entry.lastUpdated;
-    const timeText = timestamp ? new Date(timestamp).toLocaleString('ko-KR', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '�쒓컖 誘몄젣怨�';
-    const label = freshness.stale ? '�ㅻ옒�� 留덉�留� 媛�寃�' : '留덉�留� �뺤긽 媛�寃�';
-    const recentFailure = entry.lastError ? ' 쨌 理쒓렐 議고쉶 �ㅽ뙣' : '';
-    return `<small class="quote-status ${freshness.stale ? 'stale' : 'fresh'}">${label} 쨌 �쒖꽭 ${timeText}${recentFailure}</small>`;
+    const timeText = timestamp ? new Date(timestamp).toLocaleString('ko-KR', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '시각 미제공';
+    const label = freshness.stale ? '오래된 마지막 가격' : '마지막 정상 가격';
+    const recentFailure = entry.lastError ? ' · 최근 조회 실패' : '';
+    return `<small class="quote-status ${freshness.stale ? 'stale' : 'fresh'}">${label} · 시세 ${timeText}${recentFailure}</small>`;
 }
 
 // Update the price timestamp display
@@ -536,13 +536,13 @@ function updatePriceTimestamp() {
             hour: '2-digit', minute: '2-digit' 
         });
         
-        const counts = Number.isFinite(priceStatus.successCount) ? ` 쨌 �쒖꽭 ${priceStatus.successCount}�깃났/${priceStatus.failCount || 0}�ㅽ뙣` : '';
+        const counts = Number.isFinite(priceStatus.successCount) ? ` · 시세 ${priceStatus.successCount}성공/${priceStatus.failCount || 0}실패` : '';
         const fxMeta = state.currentExchangeRateMeta || {};
         const rateStr = state.currentExchangeRate
-            ? ` 쨌 �섏쑉 ��${state.currentExchangeRate.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}${fxMeta.asOf ? ` (湲곗� ${new Date(fxMeta.asOf).toLocaleDateString('ko-KR')})` : ''}`
-            : ' 쨌 �섏쑉 誘몄“��';
-        const fxError = fxMeta.status === 'error' ? ' 쨌 �섏쑉 理쒓렐 議고쉶 �ㅽ뙣(留덉�留� �뺤긽媛� �좎�)' : '';
-        el.textContent = `留덉�留� �쒕룄: ${timeStr}${counts}${rateStr}${fxError}`;
+            ? ` · 환율 ₩${state.currentExchangeRate.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}${fxMeta.asOf ? ` (기준 ${new Date(fxMeta.asOf).toLocaleDateString('ko-KR')})` : ''}`
+            : ' · 환율 미조회';
+        const fxError = fxMeta.status === 'error' ? ' · 환율 최근 조회 실패(마지막 정상값 유지)' : '';
+        el.textContent = `마지막 시도: ${timeStr}${counts}${rateStr}${fxError}`;
     } else {
         el.textContent = '';
     }
@@ -594,15 +594,15 @@ function setupEventListeners() {
     // Modals Open Buttons
     document.getElementById('btnAddAccount').addEventListener('click', () => {
         editingAccountId = null;
-        document.querySelector('#modalAccount .modal-title').textContent = '�� 怨꾩쥖 �깅줉';
-        document.querySelector('#formAccount button[type="submit"]').textContent = '�깅줉�섍린';
+        document.querySelector('#modalAccount .modal-title').textContent = '새 계좌 등록';
+        document.querySelector('#formAccount button[type="submit"]').textContent = '등록하기';
         document.getElementById('formAccount').reset();
         openModal('modalAccount');
     });
     document.getElementById('btnAddPortfolio').addEventListener('click', () => {
         editingPortfolioId = null;
-        document.querySelector('#modalPortfolio .modal-title').textContent = '蹂댁쑀 二쇱떇 �깅줉';
-        document.querySelector('#formPortfolio button[type="submit"]').textContent = '�깅줉�섍린';
+        document.querySelector('#modalPortfolio .modal-title').textContent = '보유 주식 등록';
+        document.querySelector('#formPortfolio button[type="submit"]').textContent = '등록하기';
         document.getElementById('formPortfolio').reset();
         document.querySelectorAll('.months-selection-grid input[type="checkbox"]').forEach(cb => cb.checked = false);
         populateAccountSelect('portfolioAccount');
@@ -610,8 +610,8 @@ function setupEventListeners() {
     });
     document.getElementById('btnAddDividend').addEventListener('click', () => {
         editingDividendId = null;
-        document.querySelector('#modalDividend .modal-title').textContent = '諛곕떦 �섎졊 湲곕줉';
-        document.querySelector('#formDividend button[type="submit"]').textContent = '�깅줉�섍린';
+        document.querySelector('#modalDividend .modal-title').textContent = '배당 수령 기록';
+        document.querySelector('#formDividend button[type="submit"]').textContent = '등록하기';
         document.getElementById('formDividend').reset();
         const rateInput = document.getElementById('dividendExchangeRate');
         rateInput.dataset.manualVersion = '0';
@@ -630,7 +630,7 @@ function setupEventListeners() {
     });
 
     // -------------------------------------------------------
-    // Dividend Modal �� Exchange Rate Auto-Fetch Logic
+    // Dividend Modal – Exchange Rate Auto-Fetch Logic
     // -------------------------------------------------------
     const dateInput    = document.getElementById('dividendDate');
     const stockSelect  = document.getElementById('dividendStock');
@@ -645,7 +645,7 @@ function setupEventListeners() {
         rateInput.dataset.rateDate = dateInput.value;
         if (rateStatus) {
             rateStatus.style.color = 'var(--text-secondary)';
-            rateStatus.textContent = '�섎룞 �낅젰媛믪쓣 �ъ슜�⑸땲��.';
+            rateStatus.textContent = '수동 입력값을 사용합니다.';
         }
     });
 
@@ -667,7 +667,7 @@ function setupEventListeners() {
 
         if (showStatus) {
             rateStatus.style.color = 'var(--text-secondary)';
-            rateStatus.textContent = '�� �섏쑉 議고쉶 以�...';
+            rateStatus.textContent = '⏳ 환율 조회 중...';
         }
 
         try {
@@ -687,23 +687,23 @@ function setupEventListeners() {
                 if (showStatus) {
                     rateStatus.style.color = '#10b981';
                     const basisText = result.rateDate === result.requestedDate
-                        ? `${result.rateDate} 湲곗�`
-                        : `${result.requestedDate} �붿껌 쨌 �ㅼ젣 湲곗� ${result.rateDate}`;
-                    rateStatus.textContent = `�� ${basisText}: ${result.rate.toFixed(2)}�� (${result.source})`;
+                        ? `${result.rateDate} 기준`
+                        : `${result.requestedDate} 요청 · 실제 기준 ${result.rateDate}`;
+                    rateStatus.textContent = `✔ ${basisText}: ${result.rate.toFixed(2)}원 (${result.source})`;
                 }
             } else {
                 if (showStatus) {
                     rateStatus.style.color = 'var(--danger)';
-                    const currentHint = result.fallbackRate ? ` 留덉�留� �됯� �섏쑉 ${result.fallbackRate.toFixed(2)}�먯� �먮룞 �곸슜�섏� �딆뒿�덈떎.` : '';
-                    rateStatus.textContent = `�� ${dateStr} 怨쇨굅 �섏쑉 議고쉶 �ㅽ뙣.${currentHint} �섎룞 �낅젰�� �꾩슂�⑸땲��.`;
-                    showToast('怨쇨굅 �섏쑉�� �뺤젙�섏� 紐삵뻽�듬땲��. 湲곗〈 �섎룞媛믪쓣 蹂댁〈�덉뒿�덈떎.', 'warning');
+                    const currentHint = result.fallbackRate ? ` 마지막 평가 환율 ${result.fallbackRate.toFixed(2)}원은 자동 적용하지 않습니다.` : '';
+                    rateStatus.textContent = `⚠ ${dateStr} 과거 환율 조회 실패.${currentHint} 수동 입력이 필요합니다.`;
+                    showToast('과거 환율을 확정하지 못했습니다. 기존 수동값을 보존했습니다.', 'warning');
                 }
             }
         } catch (err) {
             if (showStatus) {
                 rateStatus.style.color = 'var(--danger)';
-                rateStatus.textContent = '�� �ㅽ듃�뚰겕 �ㅻ쪟 �� �섎룞�쇰줈 �섏쑉�� �낅젰�� 二쇱꽭��.';
-                showToast('�섏쑉 API �곌껐�� �ㅽ뙣�덉뒿�덈떎. 吏곸젒 �낅젰�� 二쇱꽭��.', 'danger');
+                rateStatus.textContent = '⚠ 네트워크 오류 – 수동으로 환율을 입력해 주세요.';
+                showToast('환율 API 연결에 실패했습니다. 직접 입력해 주세요.', 'danger');
             }
         }
     }
@@ -724,7 +724,7 @@ function setupEventListeners() {
         }
     }
 
-    // Trigger rate lookup when currency select changes (for "湲고�" stock manual selection)
+    // Trigger rate lookup when currency select changes (for "기타" stock manual selection)
     currencyField.addEventListener('change', () => {
         handleCurrencyChange(currencyField.value);
     });
@@ -751,7 +751,7 @@ function setupEventListeners() {
     // Manual refresh button
     document.getElementById('btnRefreshExchangeRate').addEventListener('click', async () => {
         if (!dateInput.value) {
-            showToast('�좎쭨瑜� 癒쇱� �좏깮�� 二쇱꽭��.', 'warning');
+            showToast('날짜를 먼저 선택해 주세요.', 'warning');
             return;
         }
         // Force re-fetch by clearing cache for this date
@@ -880,7 +880,7 @@ function setupEventListeners() {
     document.getElementById('btnExecuteReset').addEventListener('click', () => {
         const pin = document.getElementById('resetPinInput').value;
         if (pin !== '0000') {
-            showToast("鍮꾨�踰덊샇媛� �쇱튂�섏� �딆뒿�덈떎. (湲곕낯媛�: 0000)", "danger");
+            showToast("비밀번호가 일치하지 않습니다. (기본값: 0000)", "danger");
             return;
         }
         
@@ -893,7 +893,7 @@ function setupEventListeners() {
         loadMockData();
         closeModal('modalReset');
         renderAll();
-        showToast("�곗씠�곌� 諛깆뾽 諛� �덉쟾�섍쾶 珥덇린�붾릺�덉뒿�덈떎.", "success");
+        showToast("데이터가 백업 및 안전하게 초기화되었습니다.", "success");
     });
 
     // JSON Export / Import
@@ -913,14 +913,14 @@ function setupEventListeners() {
                             const recoveredState = core.migrateState(importedState, state);
                             storageWriteBlocked = false;
                             state = recoveredState;
-                            if (!saveState()) throw new Error('蹂듭썝 �곗씠�� ���� �ㅽ뙣');
+                            if (!saveState()) throw new Error('복원 데이터 저장 실패');
                             renderAll();
-                            showToast("�곗씠�� 諛깆뾽�� �깃났�곸쑝濡� 蹂듭썝�섏뿀�듬땲��.", "success");
+                            showToast("데이터 백업이 성공적으로 복원되었습니다.", "success");
                         } else {
-                            showToast("�щ컮瑜� 諛깆뾽 �뚯씪 �뺤떇�� �꾨떃�덈떎.", "danger");
+                            showToast("올바른 백업 파일 형식이 아닙니다.", "danger");
                         }
                     } catch (err) {
-                        showToast("�뚯씪�� �쎈뒗 以� �ㅻ쪟媛� 諛쒖깮�덉뒿�덈떎.", "danger");
+                        showToast("파일을 읽는 중 오류가 발생했습니다.", "danger");
                     }
                 };
                 reader.readAsText(file);
@@ -964,11 +964,11 @@ function setupEventListeners() {
     document.getElementById('reinvestStockSelect').addEventListener('change', handleReinvestStockChange);
 
     // -------------------------------------------------------
-    // Buy More (異붽� 援щℓ) Modal Logic
+    // Buy More (추가 구매) Modal Logic
     // -------------------------------------------------------
     document.getElementById('btnBuyMore').addEventListener('click', () => {
         if (state.portfolio.length === 0) {
-            showToast('�깅줉�� 醫낅ぉ�� �놁뒿�덈떎. 癒쇱� 蹂댁쑀 二쇱떇�� �깅줉�� 二쇱꽭��.', 'warning');
+            showToast('등록된 종목이 없습니다. 먼저 보유 주식을 등록해 주세요.', 'warning');
             return;
         }
         document.getElementById('formBuyMore').reset();
@@ -1001,12 +1001,12 @@ function setupEventListeners() {
 
     document.getElementById('buyMoreStock').addEventListener('change', updateBuyMoreInfo);
 
-    // Cross-calculation: shares �� per-share price �� total price
+    // Cross-calculation: shares ↔ per-share price ↔ total price
     const buySharesInput = document.getElementById('buyMoreShares');
     const buyPriceInput  = document.getElementById('buyMorePrice');
     const buyTotalInput  = document.getElementById('buyMoreTotalPrice');
 
-    // When quantity changes �� recalculate total from per-share (if per-share is filled)
+    // When quantity changes → recalculate total from per-share (if per-share is filled)
     buySharesInput.addEventListener('input', () => {
         const shares = parseFloat(buySharesInput.value);
         const price  = parseFloat(buyPriceInput.value);
@@ -1016,7 +1016,7 @@ function setupEventListeners() {
         updateBuyMorePreview();
     });
 
-    // When per-share price changes �� recalculate total
+    // When per-share price changes → recalculate total
     buyPriceInput.addEventListener('input', () => {
         const shares = parseFloat(buySharesInput.value);
         const price  = parseFloat(buyPriceInput.value);
@@ -1026,7 +1026,7 @@ function setupEventListeners() {
         updateBuyMorePreview();
     });
 
-    // When total price changes �� back-calculate per-share price
+    // When total price changes → back-calculate per-share price
     buyTotalInput.addEventListener('input', () => {
         const shares = parseFloat(buySharesInput.value);
         const total  = parseFloat(buyTotalInput.value);
@@ -1108,9 +1108,9 @@ function toggleTheme() {
     // Update theme toggle button text/icon
     const themeBtn = document.getElementById('themeToggleBtn');
     if (nextTheme === 'light') {
-        themeBtn.innerHTML = '<i data-lucide="moon"></i> �ㅽ겕 紐⑤뱶';
+        themeBtn.innerHTML = '<i data-lucide="moon"></i> 다크 모드';
     } else {
-        themeBtn.innerHTML = '<i data-lucide="sun"></i> �쇱씠�� 紐⑤뱶';
+        themeBtn.innerHTML = '<i data-lucide="sun"></i> 라이트 모드';
     }
     
     saveThemePreference(nextTheme);
@@ -1143,8 +1143,8 @@ function openEditAccount(id) {
     document.getElementById('accountType').value = acc.type;
     document.getElementById('accountNumber').value = acc.accountNumber || '';
     
-    document.querySelector('#modalAccount .modal-title').textContent = '怨꾩쥖 �뺣낫 �섏젙';
-    document.querySelector('#formAccount button[type="submit"]').textContent = '�섏젙�섍린';
+    document.querySelector('#modalAccount .modal-title').textContent = '계좌 정보 수정';
+    document.querySelector('#formAccount button[type="submit"]').textContent = '수정하기';
     
     openModal('modalAccount');
 }
@@ -1173,8 +1173,8 @@ function openEditPortfolio(id) {
         if (checkbox) checkbox.checked = true;
     });
     
-    document.querySelector('#modalPortfolio .modal-title').textContent = '蹂댁쑀 二쇱떇 �뺣낫 �섏젙';
-    document.querySelector('#formPortfolio button[type="submit"]').textContent = '�섏젙�섍린';
+    document.querySelector('#modalPortfolio .modal-title').textContent = '보유 주식 정보 수정';
+    document.querySelector('#formPortfolio button[type="submit"]').textContent = '수정하기';
     
     openModal('modalPortfolio');
 }
@@ -1232,8 +1232,8 @@ function openEditDividend(id) {
         rateInput.dataset.requestedDate = log.date || '';
     }
     
-    document.querySelector('#modalDividend .modal-title').textContent = '諛곕떦 �섎졊 湲곕줉 �섏젙';
-    document.querySelector('#formDividend button[type="submit"]').textContent = '�섏젙�섍린';
+    document.querySelector('#modalDividend .modal-title').textContent = '배당 수령 기록 수정';
+    document.querySelector('#formDividend button[type="submit"]').textContent = '수정하기';
     
     openModal('modalDividend');
 }
@@ -1244,7 +1244,7 @@ function populateAccountSelect(selectId) {
     
     // If it's the dividend account select, add a placeholder first
     if (selectId === 'dividendAccountSelect') {
-        select.innerHTML = '<option value="">怨꾩쥖瑜� 癒쇱� �좏깮�섏꽭��</option>';
+        select.innerHTML = '<option value="">계좌를 먼저 선택하세요</option>';
     } else {
         select.innerHTML = '';
     }
@@ -1262,7 +1262,7 @@ function populatePortfolioSelect(selectId, accountId = null) {
     const select = document.getElementById(selectId);
     if (!select) return;
     
-    select.innerHTML = '<option value="">-- 醫낅ぉ �좏깮 --</option>';
+    select.innerHTML = '<option value="">-- 종목 선택 --</option>';
     
     let filteredPortfolio = state.portfolio;
     if (accountId) {
@@ -1276,17 +1276,17 @@ function populatePortfolioSelect(selectId, accountId = null) {
             option.textContent = `${p.name} (${p.ticker})`;
         } else {
             const acc = state.accounts.find(a => a.id === p.accountId);
-            const accName = acc ? acc.name : '誘몄��� 怨꾩쥖';
+            const accName = acc ? acc.name : '미지정 계좌';
             option.textContent = `[${accName}] ${p.name} (${p.ticker})`;
         }
         select.appendChild(option);
     });
     
-    // Add virtual "湲고�" stock if account is specified
+    // Add virtual "기타" stock if account is specified
     if (accountId) {
         const option = document.createElement('option');
         option.value = `etc-${accountId}`;
-        option.textContent = `湲고� (ETC)`;
+        option.textContent = `기타 (ETC)`;
         select.appendChild(option);
     }
 }
@@ -1301,7 +1301,7 @@ function populateFilterSelects() {
     const selectedStock = filterStock.value;
     
     // 1. Populate Account Filter for Dividend Logs
-    filterAccount.innerHTML = '<option value="">�꾩껜 怨꾩쥖</option>';
+    filterAccount.innerHTML = '<option value="">전체 계좌</option>';
     state.accounts.forEach(acc => {
         const option = document.createElement('option');
         option.value = acc.id;
@@ -1317,7 +1317,7 @@ function populateFilterSelects() {
     const filterPortfolioAccount = document.getElementById('filterPortfolioAccount');
     if (filterPortfolioAccount) {
         const selectedPortAccount = filterPortfolioAccount.value;
-        filterPortfolioAccount.innerHTML = '<option value="all">�꾩껜 怨꾩쥖 蹂닿린</option>';
+        filterPortfolioAccount.innerHTML = '<option value="all">전체 계좌 보기</option>';
         state.accounts.forEach(acc => {
             const option = document.createElement('option');
             option.value = acc.id;
@@ -1331,7 +1331,7 @@ function populateFilterSelects() {
     }
     
     // 2. Populate Stock Filter based on selected Account
-    filterStock.innerHTML = '<option value="">�꾩껜 醫낅ぉ</option>';
+    filterStock.innerHTML = '<option value="">전체 종목</option>';
     
     let filteredPortfolio = state.portfolio;
     if (selectedAccount) {
@@ -1343,7 +1343,7 @@ function populateFilterSelects() {
         option.value = stock.id;
         
         const acc = state.accounts.find(a => a.id === stock.accountId);
-        const accName = acc ? acc.name : '誘몄��� 怨꾩쥖';
+        const accName = acc ? acc.name : '미지정 계좌';
         
         option.textContent = `[${accName}] ${stock.name} (${stock.ticker})`;
         if (stock.id === selectedStock) {
@@ -1352,13 +1352,13 @@ function populateFilterSelects() {
         filterStock.appendChild(option);
     });
 
-    // Add virtual "湲고�" stock options to filter
+    // Add virtual "기타" stock options to filter
     if (selectedAccount) {
         const acc = state.accounts.find(a => a.id === selectedAccount);
         if (acc) {
             const option = document.createElement('option');
             option.value = `etc-${selectedAccount}`;
-            option.textContent = `[${acc.name}] 湲고� (ETC)`;
+            option.textContent = `[${acc.name}] 기타 (ETC)`;
             if (option.value === selectedStock) option.selected = true;
             filterStock.appendChild(option);
         }
@@ -1366,13 +1366,13 @@ function populateFilterSelects() {
         state.accounts.forEach(acc => {
             const option = document.createElement('option');
             option.value = `etc-${acc.id}`;
-            option.textContent = `[${acc.name}] 湲고� (ETC)`;
+            option.textContent = `[${acc.name}] 기타 (ETC)`;
             if (option.value === selectedStock) option.selected = true;
             filterStock.appendChild(option);
         });
     }
     
-    // If the selected stock is not in the filtered portfolio and not a virtual "湲고�" option, reset the stock filter value
+    // If the selected stock is not in the filtered portfolio and not a virtual "기타" option, reset the stock filter value
     const isVirtualSelected = selectedStock && selectedStock.startsWith('etc-');
     if (selectedStock && !isVirtualSelected && !filteredPortfolio.some(p => p.id === selectedStock)) {
         filterStock.value = "";
@@ -1453,7 +1453,7 @@ function handleAccountSubmit(e) {
             acc.name = name;
             acc.type = type;
             acc.accountNumber = accountNumber;
-            showToast("怨꾩쥖 �뺣낫媛� �섏젙�섏뿀�듬땲��.", "success");
+            showToast("계좌 정보가 수정되었습니다.", "success");
         }
         editingAccountId = null;
     } else {
@@ -1464,7 +1464,7 @@ function handleAccountSubmit(e) {
             accountNumber
         };
         state.accounts.push(newAccount);
-        showToast("怨꾩쥖媛� �깃났�곸쑝濡� 異붽��섏뿀�듬땲��.", "success");
+        showToast("계좌가 성공적으로 추가되었습니다.", "success");
     }
     saveState();
     closeModal('modalAccount');
@@ -1490,7 +1490,7 @@ function handlePortfolioSubmit(e) {
     });
 
     if (exMonths.length === 0) {
-        showToast("諛곕떦 吏�湲� �붿쓣 理쒖냼 �섎굹 �댁긽 �좏깮�� 二쇱꽭��.", "warning");
+        showToast("배당 지급 월을 최소 하나 이상 선택해 주세요.", "warning");
         return;
     }
 
@@ -1510,7 +1510,7 @@ function handlePortfolioSubmit(e) {
             // Sync with latest share history
             syncLatestShareHistory(stock.id, shares);
             
-            showToast("蹂댁쑀 醫낅ぉ �뺣낫媛� �섏젙�섏뿀�듬땲��.", "success");
+            showToast("보유 종목 정보가 수정되었습니다.", "success");
         }
         editingPortfolioId = null;
     } else {
@@ -1536,7 +1536,7 @@ function handlePortfolioSubmit(e) {
             shares: shares
         });
         
-        showToast("蹂댁쑀 醫낅ぉ�� 異붽��섏뿀�듬땲��.", "success");
+        showToast("보유 종목이 추가되었습니다.", "success");
     }
     saveState();
     closeModal('modalPortfolio');
@@ -1565,7 +1565,7 @@ function syncLatestShareHistory(portfolioId, newShares) {
 }
 
 // -------------------------------------------------------
-// Additional Purchase (異붽� 援щℓ) Helpers
+// Additional Purchase (추가 구매) Helpers
 // -------------------------------------------------------
 function updateBuyMoreInfo() {
     const select = document.getElementById('buyMoreStock');
@@ -1577,8 +1577,8 @@ function updateBuyMoreInfo() {
     
     if (stock) {
         document.getElementById('buyMoreCurShares').textContent = 
-            stock.shares.toLocaleString('ko-KR', { maximumFractionDigits: 4 }) + '二�';
-        const currency = stock.currency === 'USD' ? '$' : '��';
+            stock.shares.toLocaleString('ko-KR', { maximumFractionDigits: 4 }) + '주';
+        const currency = stock.currency === 'USD' ? '$' : '₩';
         document.getElementById('buyMoreCurAvg').textContent = 
             currency + stock.avgPrice.toLocaleString('ko-KR', { maximumFractionDigits: 2 });
         infoBox.style.display = 'block';
@@ -1614,9 +1614,9 @@ function updateBuyMorePreview() {
     const totalShares = stock.shares + addShares;
     const newAvg = ((stock.shares * stock.avgPrice) + (addShares * buyPrice)) / totalShares;
     
-    const currency = stock.currency === 'USD' ? '$' : '��';
+    const currency = stock.currency === 'USD' ? '$' : '₩';
     document.getElementById('buyMoreNewShares').textContent =
-        totalShares.toLocaleString('ko-KR', { maximumFractionDigits: 4 }) + '二�';
+        totalShares.toLocaleString('ko-KR', { maximumFractionDigits: 4 }) + '주';
     document.getElementById('buyMoreNewAvg').textContent =
         currency + newAvg.toLocaleString('ko-KR', { maximumFractionDigits: 2 });
     
@@ -1631,7 +1631,7 @@ function handleBuyMoreSubmit(e) {
     const stock   = state.portfolio.find(p => p.id === stockId);
     
     if (!stock) {
-        showToast('醫낅ぉ�� �좏깮�� 二쇱꽭��.', 'warning');
+        showToast('종목을 선택해 주세요.', 'warning');
         return;
     }
     
@@ -1640,7 +1640,7 @@ function handleBuyMoreSubmit(e) {
     const buyDate   = document.getElementById('buyMoreDate').value;
     
     if (!addShares || !buyPrice || !buyDate || addShares <= 0 || buyPrice <= 0) {
-        showToast('�섎웾, �④�, �좎쭨瑜� �щ컮瑜닿쾶 �낅젰�� 二쇱꽭��.', 'warning');
+        showToast('수량, 단가, 날짜를 올바르게 입력해 주세요.', 'warning');
         return;
     }
     
@@ -1668,7 +1668,7 @@ function handleBuyMoreSubmit(e) {
     document.getElementById('buyMoreCurrentInfo').style.display = 'none';
     document.getElementById('buyMorePreview').style.display = 'none';
     
-    showToast(`${stock.name} ${addShares}二� 異붽� 援щℓ 諛섏쁺 �꾨즺! 珥� ${stock.shares}二� 쨌 �됯퇏�④� ${stock.avgPrice.toFixed(2)}`, 'success');
+    showToast(`${stock.name} ${addShares}주 추가 구매 반영 완료! 총 ${stock.shares}주 · 평균단가 ${stock.avgPrice.toFixed(2)}`, 'success');
     renderAll();
 }
 
@@ -1684,11 +1684,11 @@ async function handleDividendSubmit(e) {
     const stock = state.portfolio.find(p => p.id === portfolioId);
     
     if (!stock && !isEtc) {
-        showToast("醫낅ぉ�� �좏깮�� 二쇱꽭��.", "warning");
+        showToast("종목을 선택해 주세요.", "warning");
         return;
     }
     if (!core.isPositiveNumber(amount) || tax < 0 || tax > amount) {
-        showToast('�몄쟾 �섎졊�↔낵 �멸툑�� �щ컮瑜닿쾶 �낅젰�� 二쇱꽭��.', 'warning');
+        showToast('세전 수령액과 세금을 올바르게 입력해 주세요.', 'warning');
         return;
     }
 
@@ -1706,7 +1706,7 @@ async function handleDividendSubmit(e) {
         if (!core.isPositiveNumber(rate)) {
             const result = await getHistoricalExchangeRate(dateVal);
             if (!result.ok) {
-                showToast('怨쇨굅 �섏쑉�� �뺤젙�� �� �놁뒿�덈떎. �곸슜 �섏쑉�� 吏곸젒 �낅젰�� 二쇱꽭��.', 'danger');
+                showToast('과거 환율을 확정할 수 없습니다. 적용 환율을 직접 입력해 주세요.', 'danger');
                 return;
             }
             rate = result.rate;
@@ -1736,7 +1736,7 @@ async function handleDividendSubmit(e) {
             log.exchangeRateRequestedDate = rateRequestedDate;
             log.exchangeRateSource = rateSource;
             log.exchangeRateIsFallback = false;
-            showToast("諛곕떦 �섎졊 湲곕줉�� �섏젙�섏뿀�듬땲��.", "success");
+            showToast("배당 수령 기록이 수정되었습니다.", "success");
         }
         editingDividendId = null;
     } else {
@@ -1757,7 +1757,7 @@ async function handleDividendSubmit(e) {
             exchangeRateIsFallback: false
         };
         state.dividendLogs.push(newLog);
-        showToast("諛곕떦湲� �섎졊 湲곕줉�� 異붽��섏뿀�듬땲��.", "success");
+        showToast("배당금 수령 기록이 추가되었습니다.", "success");
     }
 
     // Sort logs by date
@@ -1771,7 +1771,7 @@ async function handleDividendSubmit(e) {
 
 // Delete Handlers
 function deleteAccount(id) {
-    if (confirm("�� 怨꾩쥖瑜� ��젣�섏떆寃좎뒿�덇퉴? �곌껐�� �ы듃�대━�� 諛� 諛곕떦湲� �섎졊 湲곕줉�� ��젣�� �� �덉뒿�덈떎.")) {
+    if (confirm("이 계좌를 삭제하시겠습니까? 연결된 포트폴리오 및 배당금 수령 기록도 삭제될 수 있습니다.")) {
         // Find portfolio items tied to this account
         const portIds = state.portfolio.filter(p => p.accountId === id).map(p => p.id);
         // Filter portfolio
@@ -1791,27 +1791,27 @@ function deleteAccount(id) {
         
         saveState();
         renderAll();
-        showToast("怨꾩쥖媛� ��젣�섏뿀�듬땲��.", "success");
+        showToast("계좌가 삭제되었습니다.", "success");
     }
 }
 
 function deletePortfolio(id) {
-    if (confirm("�� 蹂댁쑀 醫낅ぉ�� ��젣�섏떆寃좎뒿�덇퉴? 愿��⑤맂 諛곕떦湲� �섎졊 湲곕줉�� 紐⑤몢 ��젣�⑸땲��.")) {
+    if (confirm("이 보유 종목을 삭제하시겠습니까? 관련된 배당금 수령 기록도 모두 삭제됩니다.")) {
         state.portfolio = state.portfolio.filter(p => p.id !== id);
         state.dividendLogs = state.dividendLogs.filter(log => log.portfolioId !== id);
         state.shareHistory = state.shareHistory.filter(sh => sh.portfolioId !== id);
         saveState();
         renderAll();
-        showToast("醫낅ぉ�� ��젣�섏뿀�듬땲��.", "success");
+        showToast("종목이 삭제되었습니다.", "success");
     }
 }
 
 function deleteDividendLog(id) {
-    if (confirm("�� 諛곕떦湲� �섎졊 湲곕줉�� ��젣�섏떆寃좎뒿�덇퉴?")) {
+    if (confirm("이 배당금 수령 기록을 삭제하시겠습니까?")) {
         state.dividendLogs = state.dividendLogs.filter(log => log.id !== id);
         saveState();
         renderAll();
-        showToast("�섎졊 湲곕줉�� ��젣�섏뿀�듬땲��.", "success");
+        showToast("수령 기록이 삭제되었습니다.", "success");
     }
 }
 
@@ -1825,7 +1825,7 @@ function exportDataJSON() {
     document.body.appendChild(downloadAnchor);
     downloadAnchor.click();
     downloadAnchor.remove();
-    showToast("�곗씠�� 諛깆뾽 �뚯씪�� �대낫�댁죱�듬땲��.", "success");
+    showToast("데이터 백업 파일이 내보내졌습니다.", "success");
 }
 
 // Excel File Parsing & Handling
@@ -1846,7 +1846,7 @@ function handleFileSelect(file) {
             // Get headers and rows
             const json = XLSX.utils.sheet_to_json(worksheet, { header: 1 });
             if (json.length === 0) {
-                showToast("�묒� �뚯씪�� 鍮꾩뼱 �덉뒿�덈떎.", "danger");
+                showToast("엑셀 파일이 비어 있습니다.", "danger");
                 return;
             }
             
@@ -1859,10 +1859,10 @@ function handleFileSelect(file) {
             document.getElementById('importStep1').classList.remove('active');
             document.getElementById('importStep2').classList.add('active');
             
-            showToast("�묒� �뚯씪�� 遺꾩꽍�섏뿀�듬땲��. �� 留ㅽ븨�� �쒖옉�� 二쇱꽭��.", "success");
+            showToast("엑셀 파일이 분석되었습니다. 열 매핑을 시작해 주세요.", "success");
         } catch (err) {
             console.error("Excel read error:", err);
-            showToast("�묒� �뚯씪�� �뚯떛�섎뒗 �� �ㅽ뙣�덉뒿�덈떎. 吏��� �뺤떇(.xlsx, .xls, .csv)�� �뺤씤�� 二쇱꽭��.", "danger");
+            showToast("엑셀 파일을 파싱하는 데 실패했습니다. 지원 형식(.xlsx, .xls, .csv)을 확인해 주세요.", "danger");
         }
     };
     reader.readAsArrayBuffer(file);
@@ -1877,25 +1877,25 @@ function setupMappingUI() {
     let fields = [];
     if (importType === 'portfolio') {
         fields = [
-            { key: 'account', label: '怨꾩쥖紐� (Account)', required: true },
-            { key: 'name', label: '醫낅ぉ紐� (Name)', required: true },
-            { key: 'ticker', label: '�곗빱/醫낅ぉ肄붾뱶 (Ticker)', required: true },
-            { key: 'shares', label: '蹂댁쑀�섎웾 (Shares)', required: true },
-            { key: 'avgPrice', label: '�됯퇏留ㅼ닔�④� (Avg Price)', required: true },
-            { key: 'currency', label: '�듯솕 (KRW/USD)', required: false },
-            { key: 'annualDividend', label: '二쇰떦 �곕같�밴툑 (Annual Dividend)', required: true },
-            { key: 'frequency', label: '諛곕떦二쇨린 (Monthly/Quarterly...)', required: false },
-            { key: 'exMonths', label: '諛곕떦�� 紐⑸줉 (��: 3,6,9,12)', required: false }
+            { key: 'account', label: '계좌명 (Account)', required: true },
+            { key: 'name', label: '종목명 (Name)', required: true },
+            { key: 'ticker', label: '티커/종목코드 (Ticker)', required: true },
+            { key: 'shares', label: '보유수량 (Shares)', required: true },
+            { key: 'avgPrice', label: '평균매수단가 (Avg Price)', required: true },
+            { key: 'currency', label: '통화 (KRW/USD)', required: false },
+            { key: 'annualDividend', label: '주당 연배당금 (Annual Dividend)', required: true },
+            { key: 'frequency', label: '배당주기 (Monthly/Quarterly...)', required: false },
+            { key: 'exMonths', label: '배당월 목록 (예: 3,6,9,12)', required: false }
         ];
     } else {
         // Dividend logs
         fields = [
-            { key: 'date', label: '諛곕떦 �섎졊�� (Date)', required: true },
-            { key: 'ticker', label: '�곗빱 �먮뒗 醫낅ぉ肄붾뱶 (Ticker)', required: true },
-            { key: 'amount', label: '�몄쟾 諛곕떦湲덉븸 (Amount)', required: true },
-            { key: 'currency', label: '�듯솕 (KRW/USD)', required: false },
-            { key: 'tax', label: '諛곕떦�멸툑 (Tax)', required: false },
-            { key: 'exchangeRate', label: '�섏쑉 (Exchange Rate)', required: false }
+            { key: 'date', label: '배당 수령일 (Date)', required: true },
+            { key: 'ticker', label: '티커 또는 종목코드 (Ticker)', required: true },
+            { key: 'amount', label: '세전 배당금액 (Amount)', required: true },
+            { key: 'currency', label: '통화 (KRW/USD)', required: false },
+            { key: 'tax', label: '배당세금 (Tax)', required: false },
+            { key: 'exchangeRate', label: '환율 (Exchange Rate)', required: false }
         ];
     }
 
@@ -1913,22 +1913,22 @@ function setupMappingUI() {
             if (hLower === lowercaseKey || 
                 hLower.includes(lowercaseKey) || 
                 lowercaseLabel.includes(hLower) ||
-                (f.key === 'account' && (hLower.includes('怨꾩쥖') || hLower.includes('acc'))) ||
-                (f.key === 'avgPrice' && (hLower.includes('�④�') || hLower.includes('留ㅼ닔媛�') || hLower.includes('�됰떒'))) ||
-                (f.key === 'shares' && (hLower.includes('�섎웾') || hLower.includes('蹂댁쑀') || hLower.includes('媛쒖닔'))) ||
-                (f.key === 'annualDividend' && (hLower.includes('諛곕떦湲�') || hLower.includes('�곕같��'))) ||
-                (f.key === 'exMonths' && hLower.includes('諛곕떦��')) ||
-                (f.key === 'ticker' && (hLower.includes('肄붾뱶') || hLower.includes('�곗빱') || hLower.includes('symbol'))) ||
-                (f.key === 'date' && (hLower.includes('�쇱옄') || hLower.includes('�좎쭨') || hLower.includes('諛곕떦��'))) ||
-                (f.key === 'tax' && (hLower.includes('�멸툑') || hLower.includes('�먯쿇吏뺤닔'))) ||
-                (f.key === 'amount' && (hLower.includes('�섎졊��') || hLower.includes('湲덉븸') || hLower.includes('諛곕떦湲�')))) {
+                (f.key === 'account' && (hLower.includes('계좌') || hLower.includes('acc'))) ||
+                (f.key === 'avgPrice' && (hLower.includes('단가') || hLower.includes('매수가') || hLower.includes('평단'))) ||
+                (f.key === 'shares' && (hLower.includes('수량') || hLower.includes('보유') || hLower.includes('개수'))) ||
+                (f.key === 'annualDividend' && (hLower.includes('배당금') || hLower.includes('연배당'))) ||
+                (f.key === 'exMonths' && hLower.includes('배당월')) ||
+                (f.key === 'ticker' && (hLower.includes('코드') || hLower.includes('티커') || hLower.includes('symbol'))) ||
+                (f.key === 'date' && (hLower.includes('일자') || hLower.includes('날짜') || hLower.includes('배당일'))) ||
+                (f.key === 'tax' && (hLower.includes('세금') || hLower.includes('원천징수'))) ||
+                (f.key === 'amount' && (hLower.includes('수령액') || hLower.includes('금액') || hLower.includes('배당금')))) {
                 bestMatch = header;
                 break;
             }
         }
 
         let options = excelHeaders.map(h => `<option value="${h}" ${h === bestMatch ? 'selected' : ''}>${h}</option>`).join('');
-        options = `<option value="">-- 留ㅽ븨 �� �� ${f.required ? '(�꾩닔)' : ''} --</option>` + options;
+        options = `<option value="">-- 매핑 안 함 ${f.required ? '(필수)' : ''} --</option>` + options;
         
         formGroup.innerHTML = `
             <label>${f.label}</label>
@@ -1953,7 +1953,7 @@ async function executeImport() {
     let successCount = 0;
     let failCount = 0;
     
-    showToast("�곗씠�곕� 媛��몄삤�� 以묒엯�덈떎...", "warning");
+    showToast("데이터를 가져오는 중입니다...", "warning");
 
     if (importType === 'portfolio') {
         const mapAccount = document.getElementById('map-account').value;
@@ -1995,7 +1995,7 @@ async function executeImport() {
                 let currency = 'KRW';
                 if (mapCurrency && row[mapCurrency]) {
                     const curStr = String(row[mapCurrency]).trim().toUpperCase();
-                    if (curStr === 'USD' || curStr === '$' || curStr.includes('�щ윭')) {
+                    if (curStr === 'USD' || curStr === '$' || curStr.includes('달러')) {
                         currency = 'USD';
                     }
                 } else {
@@ -2009,9 +2009,9 @@ async function executeImport() {
                 let frequency = 'Quarterly';
                 if (mapFrequency && row[mapFrequency]) {
                     const freqStr = String(row[mapFrequency]).trim().toLowerCase();
-                    if (freqStr.includes('��') || freqStr.includes('month')) frequency = 'Monthly';
-                    else if (freqStr.includes('諛�') || freqStr.includes('semi')) frequency = 'Semi-Annual';
-                    else if (freqStr.includes('��') || freqStr.includes('annual')) frequency = 'Annual';
+                    if (freqStr.includes('월') || freqStr.includes('month')) frequency = 'Monthly';
+                    else if (freqStr.includes('반') || freqStr.includes('semi')) frequency = 'Semi-Annual';
+                    else if (freqStr.includes('년') || freqStr.includes('annual')) frequency = 'Annual';
                 }
 
                 // ExMonths check
@@ -2086,7 +2086,7 @@ async function executeImport() {
                     // Create dummy stock under default account
                     let defaultAcc = state.accounts[0];
                     if (!defaultAcc) {
-                        defaultAcc = { id: 'acc-default', name: '媛��몄삩 怨꾩쥖', type: 'General' };
+                        defaultAcc = { id: 'acc-default', name: '가져온 계좌', type: 'General' };
                         state.accounts.push(defaultAcc);
                     }
                     stock = {
@@ -2113,12 +2113,12 @@ async function executeImport() {
                 if (currency === 'USD') {
                     if (mapRate && row[mapRate] && !isNaN(parseFloat(row[mapRate]))) {
                         rate = parseFloat(row[mapRate]);
-                        if (!core.isPositiveNumber(rate)) throw new Error('�섏쑉 媛믪씠 �щ컮瑜댁� �딆뒿�덈떎.');
+                        if (!core.isPositiveNumber(rate)) throw new Error('환율 값이 올바르지 않습니다.');
                         rateSource = 'excel-manual';
                     } else {
                         // Fetch historical rate
                         const result = await getHistoricalExchangeRate(dateStr);
-                        if (!result.ok) throw new Error(`${dateStr} 怨쇨굅 �섏쑉 議고쉶 �ㅽ뙣`);
+                        if (!result.ok) throw new Error(`${dateStr} 과거 환율 조회 실패`);
                         rate = result.rate;
                         rateDate = result.rateDate;
                         rateRequestedDate = result.requestedDate;
@@ -2168,7 +2168,7 @@ async function executeImport() {
 
     renderAll();
     
-    showToast(`${successCount}媛쒖쓽 �됱쓣 �깃났�곸쑝濡� 媛��몄솕�듬땲��. (�ㅻ쪟: ${failCount}媛�)`, "success");
+    showToast(`${successCount}개의 행을 성공적으로 가져왔습니다. (오류: ${failCount}개)`, "success");
     switchTab('tab-dashboard');
 }
 
@@ -2194,8 +2194,8 @@ function renderAll() {
 
 function renderKPIs() {
     // Calculators
-    let totalCostBasis = 0;        // 留ㅼ닔湲덉븸 (shares 횞 avgPrice)
-    let totalMarketValue = 0;      // �됯�湲덉븸 (shares 횞 currentPrice)
+    let totalCostBasis = 0;        // 매수금액 (shares × avgPrice)
+    let totalMarketValue = 0;      // 평가금액 (shares × currentPrice)
     let totalExpectedAnnualDiv = 0;
     let pricedCostBasis = 0;
     let pricedExpectedAnnualDiv = 0;
@@ -2241,7 +2241,7 @@ function renderKPIs() {
     document.getElementById('kpiTotalCost').textContent = formatCurrency(totalCostBasis);
     document.getElementById('kpiMarketValue').textContent = formatCurrency(totalMarketValue);
     const coverageEl = document.getElementById('kpiMarketCoverage');
-    if (coverageEl) coverageEl.textContent = `�쒖꽭 �ы븿 ${freshCount + staleCount}/${state.portfolio.length} 쨌 理쒖떊 ${freshCount} 쨌 �ㅻ옒�� ${staleCount} 쨌 誘몄“�� ${missingCount}`;
+    if (coverageEl) coverageEl.textContent = `시세 포함 ${freshCount + staleCount}/${state.portfolio.length} · 최신 ${freshCount} · 오래됨 ${staleCount} · 미조회 ${missingCount}`;
     
     const plEl = document.getElementById('kpiProfitLoss');
     if (plEl) {
@@ -2267,8 +2267,8 @@ function renderAccountsTable() {
         listContainer.innerHTML = `
             <div class="empty-state full-width">
                 <i data-lucide="wallet"></i>
-                <h3>�깅줉�� 怨꾩쥖媛� �놁뒿�덈떎</h3>
-                <p>諛곕떦二쇰� 愿�由ы븷 怨꾩쥖瑜� �깅줉�� 二쇱꽭��.</p>
+                <h3>등록된 계좌가 없습니다</h3>
+                <p>배당주를 관리할 계좌를 등록해 주세요.</p>
             </div>
         `;
         return;
@@ -2307,16 +2307,16 @@ function renderAccountsTable() {
             </div>
             <div class="account-card-body">
                 <div class="account-stat">
-                    <span class="account-stat-label">留ㅼ닔 湲덉븸</span>
+                    <span class="account-stat-label">매수 금액</span>
                     <span class="account-stat-value">${formatCurrency(accCostVal)}</span>
                 </div>
                 <div class="account-stat">
-                    <span class="account-stat-label">�됯� 湲덉븸</span>
+                    <span class="account-stat-label">평가 금액</span>
                     <span class="account-stat-value">${formatCurrency(accMarketVal)}</span>
                     <span class="kpi-trend ${accPLClass}" style="font-size: 0.75rem;">${accPLSign}${accPLRate.toFixed(2)}%</span>
                 </div>
                 <div class="account-stat">
-                    <span class="account-stat-label">�� �덉긽 諛곕떦湲�</span>
+                    <span class="account-stat-label">연 예상 배당금</span>
                     <span class="account-stat-value">${formatCurrency(accExpectedDiv)}</span>
                 </div>
             </div>
@@ -2344,8 +2344,8 @@ function renderPortfolioTable() {
             <tr>
                 <td colspan="13" class="empty-state">
                     <i data-lucide="folder-open"></i>
-                    <h3>蹂댁쑀 醫낅ぉ�� �놁뒿�덈떎</h3>
-                    <p>議곌굔�� 留욌뒗 醫낅ぉ�� �녾굅�� �깅줉�� 二쇱떇�� �놁뒿�덈떎.</p>
+                    <h3>보유 종목이 없습니다</h3>
+                    <p>조건에 맞는 종목이 없거나 등록된 주식이 없습니다.</p>
                 </td>
             </tr>
         `;
@@ -2364,7 +2364,7 @@ function renderPortfolioTable() {
         
         return {
             ...stock,
-            accName: acc ? acc.name : '誘몄��� 怨꾩쥖',
+            accName: acc ? acc.name : '미지정 계좌',
             accType: acc ? acc.type : 'General',
             currentPrice,
             totalCost,
@@ -2400,7 +2400,7 @@ function renderPortfolioTable() {
         // Display current price or dash if not fetched
         const curPriceDisplay = hasAnyPrice(stock)
             ? `${formatCurrency(stock.currentPrice, stock.currency)}${formatPriceQuoteMeta(stock)}`
-            : `<span style="color:var(--text-secondary);">��</span>${formatPriceQuoteMeta(stock)}`;
+            : `<span style="color:var(--text-secondary);">—</span>${formatPriceQuoteMeta(stock)}`;
         
         const tr = document.createElement('tr');
         tr.className = rowClass;
@@ -2412,14 +2412,14 @@ function renderPortfolioTable() {
             <td>${formatCurrency(stock.avgPrice, stock.currency)}</td>
             <td>${formatCurrency(stock.totalCost, stock.currency)}</td>
             <td>${curPriceDisplay}</td>
-            <td>${hasAnyPrice(stock) ? formatCurrency(stock.totalMarketVal, stock.currency) : '<span style="color:var(--text-secondary);">��</span>'}</td>
-            <td>${hasAnyPrice(stock) ? `<span class="kpi-trend ${plClass}">${plSign}${formatCurrency(stock.profitLoss, stock.currency)}<br><small>(${plSign}${stock.plRate.toFixed(2)}%)</small></span>` : '<span style="color:var(--text-secondary);">��</span>'}</td>
+            <td>${hasAnyPrice(stock) ? formatCurrency(stock.totalMarketVal, stock.currency) : '<span style="color:var(--text-secondary);">—</span>'}</td>
+            <td>${hasAnyPrice(stock) ? `<span class="kpi-trend ${plClass}">${plSign}${formatCurrency(stock.profitLoss, stock.currency)}<br><small>(${plSign}${stock.plRate.toFixed(2)}%)</small></span>` : '<span style="color:var(--text-secondary);">—</span>'}</td>
             <td>${formatCurrency(stock.annualDividend, stock.currency)}</td>
             <td>${formatCurrency(totalDiv, stock.currency)}</td>
-            <td>${stock.yieldRate === null ? '<span style="color:var(--text-secondary);">��</span>' : `<span class="kpi-trend positive">${stock.yieldRate.toFixed(2)}%</span>`}</td>
+            <td>${stock.yieldRate === null ? '<span style="color:var(--text-secondary);">—</span>' : `<span class="kpi-trend positive">${stock.yieldRate.toFixed(2)}%</span>`}</td>
             <td>
                 <div class="action-btns">
-                    <button class="btn-table-icon" onclick="openShareHistoryModal('${stock.id}')" title="�섎웾 蹂��� �대젰">
+                    <button class="btn-table-icon" onclick="openShareHistoryModal('${stock.id}')" title="수량 변동 이력">
                         <i data-lucide="history"></i>
                     </button>
                     <button class="btn-table-icon" onclick="openEditPortfolio('${stock.id}')">
@@ -2444,8 +2444,8 @@ function renderDividendLogsTable() {
             <tr>
                 <td colspan="8" class="empty-state">
                     <i data-lucide="bar-chart-2"></i>
-                    <h3>湲곕줉�� 諛곕떦 �섎졊 �댁뿭�� �놁뒿�덈떎</h3>
-                    <p>�곗륫 �곷떒�� 諛곕떦 �섎졊 湲곕줉�� �깅줉�섍굅�� �묒�濡� �� 踰덉뿉 媛��몄삤�몄슂.</p>
+                    <h3>기록된 배당 수령 내역이 없습니다</h3>
+                    <p>우측 상단의 배당 수령 기록을 등록하거나 엑셀로 한 번에 가져오세요.</p>
                 </td>
             </tr>
         `;
@@ -2489,8 +2489,8 @@ function renderDividendLogsTable() {
             <tr>
                 <td colspan="8" class="empty-state">
                     <i data-lucide="filter"></i>
-                    <h3>�꾪꽣 議곌굔�� 留욌뒗 諛곕떦 �섎졊 �댁뿭�� �놁뒿�덈떎</h3>
-                    <p>�ㅻⅨ �꾪꽣 議곌굔�� �좏깮�� 蹂댁꽭��.</p>
+                    <h3>필터 조건에 맞는 배당 수령 내역이 없습니다</h3>
+                    <p>다른 필터 조건을 선택해 보세요.</p>
                 </td>
             </tr>
         `;
@@ -2514,8 +2514,8 @@ function renderDividendLogsTable() {
         const accNameA = accA ? accA.name : '';
         const accNameB = accB ? accB.name : '';
 
-        const stockNameA = isEtcA ? '湲고�' : (stockA ? stockA.name : '');
-        const stockNameB = isEtcB ? '湲고�' : (stockB ? stockB.name : '');
+        const stockNameA = isEtcA ? '기타' : (stockA ? stockA.name : '');
+        const stockNameB = isEtcB ? '기타' : (stockB ? stockB.name : '');
 
         switch (sortDividend) {
             case 'date-asc':
@@ -2541,20 +2541,20 @@ function renderDividendLogsTable() {
 
     filteredLogs.forEach(log => {
         const isEtc = log.portfolioId && log.portfolioId.startsWith('etc-');
-        let stockName = '湲고�';
+        let stockName = '기타';
         let ticker = 'ETC';
         let accountId = '';
         if (isEtc) {
             accountId = log.portfolioId.replace('etc-', '');
         } else {
             const stock = state.portfolio.find(p => p.id === log.portfolioId);
-            stockName = stock ? stock.name : '��젣�� 醫낅ぉ';
+            stockName = stock ? stock.name : '삭제된 종목';
             ticker = stock ? stock.ticker : '-';
             accountId = stock ? stock.accountId : '';
         }
         
         const acc = state.accounts.find(a => a.id === accountId);
-        const accName = acc ? acc.name : '誘몄��� 怨꾩쥖';
+        const accName = acc ? acc.name : '미지정 계좌';
         const accType = acc ? acc.type : 'General';
         
         // Format date to Year-Month (e.g. 2026-06)
@@ -2563,11 +2563,11 @@ function renderDividendLogsTable() {
         
         const rateValue = Number(log.exchangeRate);
         const rateBasis = log.exchangeRateDate
-            ? (log.exchangeRateDate === log.date ? `${log.exchangeRateDate} 湲곗�` : `${log.date} �붿껌 쨌 ${log.exchangeRateDate} 湲곗�`)
-            : '湲곗��� 誘명솗��';
-        const sourceText = log.exchangeRateSource === 'legacy-confirmed' ? '湲곗〈 ���κ컪' : (log.exchangeRateSource || '�섎룞 �낅젰');
+            ? (log.exchangeRateDate === log.date ? `${log.exchangeRateDate} 기준` : `${log.date} 요청 · ${log.exchangeRateDate} 기준`)
+            : '기준일 미확인';
+        const sourceText = log.exchangeRateSource === 'legacy-confirmed' ? '기존 저장값' : (log.exchangeRateSource || '수동 입력');
         const rateText = log.currency === 'USD' && core.isPositiveNumber(rateValue)
-            ? `<br><small style="color: var(--text-secondary); font-size: 0.75rem;">�섏쑉 ��${rateValue.toFixed(2)} 쨌 ${rateBasis} 쨌 ${sourceText}</small>`
+            ? `<br><small style="color: var(--text-secondary); font-size: 0.75rem;">환율 ₩${rateValue.toFixed(2)} · ${rateBasis} · ${sourceText}</small>`
             : '';
         const grossKRW = core.getDividendKRW(log, 'gross');
         const netKRW = core.getDividendKRW(log, 'net');
@@ -2583,11 +2583,11 @@ function renderDividendLogsTable() {
             <td><strong>${stockName}</strong> <span class="ticker-badge">${ticker}</span></td>
             <td>${formatCurrency(log.amount, log.currency)}</td>
             <td>
-                ${grossKRW === null ? '��' : formatCurrency(grossKRW, 'KRW')}
+                ${grossKRW === null ? '—' : formatCurrency(grossKRW, 'KRW')}
                 ${rateText}
             </td>
             <td>${formatCurrency(log.tax, log.currency)}</td>
-            <td>${netKRW === null ? '��' : formatCurrency(netKRW, 'KRW')}</td>
+            <td>${netKRW === null ? '—' : formatCurrency(netKRW, 'KRW')}</td>
             <td>
                 <div class="action-btns">
                     <button class="btn-table-icon" onclick="openEditDividend('${log.id}')">
@@ -2666,7 +2666,7 @@ function renderMonthlyDividendChart(textColor, gridColor) {
             accountId = stock ? stock.accountId : 'unknown-acc';
         }
         const account = state.accounts.find(a => a.id === accountId);
-        const accountName = account ? account.name : '湲고�/吏곸젒�낅젰';
+        const accountName = account ? account.name : '기타/직접입력';
 
         if (!accountsMap[accountId]) {
             accountsMap[accountId] = {
@@ -2711,7 +2711,7 @@ function renderMonthlyDividendChart(textColor, gridColor) {
         data: {
             labels: sortedMonths.map(m => {
                 const parts = m.split('-');
-                return `${parts[0]}�� ${parseInt(parts[1])}��`;
+                return `${parts[0]}년 ${parseInt(parts[1])}월`;
             }),
             datasets: datasets
         },
@@ -2733,7 +2733,7 @@ function renderMonthlyDividendChart(textColor, gridColor) {
                         callback: function(value) {
                             return state.activeCurrency === 'USD' 
                                 ? '$' + value 
-                                : (value >= 10000 ? (value / 10000) + '留�' : value);
+                                : (value >= 10000 ? (value / 10000) + '만' : value);
                         }
                     }
                 }
@@ -2896,7 +2896,7 @@ function renderCumulativeChart(textColor, gridColor) {
         data: {
             labels: dates,
             datasets: [{
-                label: '�꾩쟻 �몄쟾 諛곕떦湲� (湲곕줉 �섏쑉)',
+                label: '누적 세전 배당금 (기록 환율)',
                 data: values,
                 borderColor: '#a855f7',
                 borderWidth: 3,
@@ -2922,7 +2922,7 @@ function renderCumulativeChart(textColor, gridColor) {
                         callback: function(value) {
                             return state.activeCurrency === 'USD' 
                                 ? '$' + value 
-                                : (value >= 10000 ? (value / 10000) + '留�' : value);
+                                : (value >= 10000 ? (value / 10000) + '만' : value);
                         }
                     }
                 }
@@ -2932,7 +2932,7 @@ function renderCumulativeChart(textColor, gridColor) {
                 tooltip: {
                     callbacks: {
                         label: function(context) {
-                            return ` �꾩쟻 �몄쟾 諛곕떦湲�: ${formatCurrency(context.parsed.y)}`;
+                            return ` 누적 세전 배당금: ${formatCurrency(context.parsed.y)}`;
                         }
                     }
                 }
@@ -2979,7 +2979,7 @@ function renderShareHistoryList(portfolioId) {
         tbody.innerHTML = `
             <tr>
                 <td colspan="3" style="text-align: center; color: var(--text-secondary); padding: 1rem;">
-                    湲곕줉�� �섎웾 蹂��� �대젰�� �놁뒿�덈떎.
+                    기록된 수량 변동 이력이 없습니다.
                 </td>
             </tr>
         `;
@@ -2993,7 +2993,7 @@ function renderShareHistoryList(portfolioId) {
         const tr = document.createElement('tr');
         tr.innerHTML = `
             <td style="padding: 0.5rem; text-align: left;">${item.date}</td>
-            <td style="padding: 0.5rem; text-align: left;">${item.shares.toLocaleString()} 二�</td>
+            <td style="padding: 0.5rem; text-align: left;">${item.shares.toLocaleString()} 주</td>
             <td style="text-align: center; padding: 0.5rem;">
                 <button class="btn-table-icon delete" onclick="deleteShareHistoryEntry('${item.id}')">
                     <i data-lucide="trash-2"></i>
@@ -3014,14 +3014,14 @@ function handleShareHistorySubmit(e) {
     const sharesVal = parseFloat(document.getElementById('historyShares').value);
     
     if (!dateVal || isNaN(sharesVal) || sharesVal <= 0) {
-        showToast("�щ컮瑜� �좎쭨�� �섎웾�� �낅젰�� 二쇱꽭��.", "warning");
+        showToast("올바른 날짜와 수량을 입력해 주세요.", "warning");
         return;
     }
     
     // Check if there is already an entry for this exact date
     const existing = state.shareHistory.find(sh => sh.portfolioId === activeShareHistoryPortfolioId && sh.date === dateVal);
     if (existing) {
-        if (confirm("�대떦 �좎쭨�� �대� �섎웾 湲곕줉�� 議댁옱�⑸땲��. 媛믪쓣 �섏젙�섏떆寃좎뒿�덇퉴?")) {
+        if (confirm("해당 날짜에 이미 수량 기록이 존재합니다. 값을 수정하시겠습니까?")) {
             existing.shares = sharesVal;
         } else {
             return;
@@ -3045,7 +3045,7 @@ function handleShareHistorySubmit(e) {
     
     // Reset form inputs except date
     document.getElementById('historyShares').value = '';
-    showToast("�섎웾 蹂��� �대젰�� 異붽�/�섏젙�섏뿀�듬땲��.", "success");
+    showToast("수량 변동 이력이 추가/수정되었습니다.", "success");
 }
 
 function deleteShareHistoryEntry(id) {
@@ -3056,11 +3056,11 @@ function deleteShareHistoryEntry(id) {
     const stockHistory = state.shareHistory.filter(sh => sh.portfolioId === portfolioId);
     
     if (stockHistory.length <= 1) {
-        showToast("理쒖냼 �섎굹�� 蹂댁쑀 �섎웾 �대젰�� 議댁옱�댁빞 �섎�濡� ��젣�� �� �놁뒿�덈떎.", "warning");
+        showToast("최소 하나의 보유 수량 이력이 존재해야 하므로 삭제할 수 없습니다.", "warning");
         return;
     }
     
-    if (confirm("�� 蹂댁쑀 �섎웾 �대젰 湲곕줉�� ��젣�섏떆寃좎뒿�덇퉴?")) {
+    if (confirm("이 보유 수량 이력 기록을 삭제하시겠습니까?")) {
         state.shareHistory = state.shareHistory.filter(sh => sh.id !== id);
         
         // Sync shares
@@ -3069,7 +3069,7 @@ function deleteShareHistoryEntry(id) {
         saveState();
         renderAll();
         renderShareHistoryList(portfolioId);
-        showToast("�섎웾 �대젰 湲곕줉�� ��젣�섏뿀�듬땲��.", "success");
+        showToast("수량 이력 기록이 삭제되었습니다.", "success");
     }
 }
 
@@ -3090,11 +3090,11 @@ function populateReinvestStockSelect() {
     if (!select) return;
     
     const selectedId = select.value;
-    select.innerHTML = '<option value="">-- 醫낅ぉ �좏깮 --</option>';
+    select.innerHTML = '<option value="">-- 종목 선택 --</option>';
     
     state.portfolio.forEach(p => {
         const acc = state.accounts.find(a => a.id === p.accountId);
-        const accName = acc ? acc.name : '誘몄��� 怨꾩쥖';
+        const accName = acc ? acc.name : '미지정 계좌';
         const option = document.createElement('option');
         option.value = p.id;
         option.textContent = `[${accName}] ${p.name} (${p.ticker})`;
@@ -3221,7 +3221,7 @@ function renderReinvestmentTab() {
     });
     
     // UPDATE KPIS
-    document.getElementById('reinvestKpiShares').textContent = `${stock.shares.toLocaleString()}二�`;
+    document.getElementById('reinvestKpiShares').textContent = `${stock.shares.toLocaleString()}주`;
     document.getElementById('reinvestKpiAvgPrice').textContent = formatCurrency(stock.avgPrice, stock.currency);
     
     // Total received dividend for this stock
@@ -3259,11 +3259,11 @@ function renderReinvestmentTab() {
         const displayYield = row.yield > 0 ? row.yield.toFixed(2) + '%' : '-';
         
         const parts = row.month.split('-');
-        const monthLabel = `${parts[0]}�� ${parseInt(parts[1])}��`;
+        const monthLabel = `${parts[0]}년 ${parseInt(parts[1])}월`;
         
         tr.innerHTML = `
             <td style="padding: 0.75rem 0.5rem;"><strong>${monthLabel}</strong></td>
-            <td style="padding: 0.75rem 0.5rem;">${row.shares.toLocaleString()} 二�</td>
+            <td style="padding: 0.75rem 0.5rem;">${row.shares.toLocaleString()} 주</td>
             <td style="padding: 0.75rem 0.5rem;">${displayDiv}</td>
             <td style="padding: 0.75rem 0.5rem;">${displayDPS}</td>
             <td style="padding: 0.75rem 0.5rem;"><span style="color: var(--primary); font-weight: 500;">${displayYield}</span></td>
@@ -3290,7 +3290,7 @@ function renderReinvestmentTab() {
     
     const chartLabels = timelineData.map(d => {
         const parts = d.month.split('-');
-        return `${parts[0]}�� ${parseInt(parts[1])}��`;
+        return `${parts[0]}년 ${parseInt(parts[1])}월`;
     });
     
     const dividendData = timelineData.map(d => d.dividend);
@@ -3302,7 +3302,7 @@ function renderReinvestmentTab() {
             labels: chartLabels,
             datasets: [
                 {
-                    label: `�� 諛곕떦湲� (${stock.currency})`,
+                    label: `월 배당금 (${stock.currency})`,
                     type: 'bar',
                     data: dividendData,
                     backgroundColor: 'rgba(99, 102, 241, 0.65)',
@@ -3312,7 +3312,7 @@ function renderReinvestmentTab() {
                     yAxisID: 'y'
                 },
                 {
-                    label: '蹂댁쑀 二쇱떇 �� (二�)',
+                    label: '보유 주식 수 (주)',
                     type: 'line',
                     data: sharesData,
                     borderColor: '#a855f7',
@@ -3341,12 +3341,12 @@ function renderReinvestmentTab() {
                     ticks: {
                         color: textColor,
                         callback: function(value) {
-                            return stock.currency === 'USD' ? '$' + value : value.toLocaleString() + '��';
+                            return stock.currency === 'USD' ? '$' + value : value.toLocaleString() + '원';
                         }
                     },
                     title: {
                         display: true,
-                        text: `諛곕떦湲� (${stock.currency})`,
+                        text: `배당금 (${stock.currency})`,
                         color: textColor,
                         font: { size: 11, weight: 'bold' }
                     }
@@ -3359,12 +3359,12 @@ function renderReinvestmentTab() {
                     ticks: {
                         color: textColor,
                         callback: function(value) {
-                            return value.toLocaleString() + ' 二�';
+                            return value.toLocaleString() + ' 주';
                         }
                     },
                     title: {
                         display: true,
-                        text: '蹂댁쑀 二쇱떇 �� (二�)',
+                        text: '보유 주식 수 (주)',
                         color: textColor,
                         font: { size: 11, weight: 'bold' }
                     }
@@ -3385,7 +3385,7 @@ function renderReinvestmentTab() {
                             if (context.datasetIndex === 0) {
                                 label += formatCurrency(context.parsed.y, stock.currency);
                             } else {
-                                label += context.parsed.y.toLocaleString() + ' 二�';
+                                label += context.parsed.y.toLocaleString() + ' 주';
                             }
                             return label;
                         }
@@ -3402,8 +3402,8 @@ function isSchdFamilyStock(stock) {
     const name = (stock.name || '').toUpperCase();
     return ticker === 'SCHD' || 
            name.includes('SCHD') || 
-           ((name.includes('誘멸뎅諛곕떦�ㅼ슦議댁뒪') || name.includes('誘멸뎅諛곕떦 �ㅼ슦議댁뒪')) &&
-            (name.includes('SOL') || name.includes('TIGER') || name.includes('ACE') || name.includes('誘몃옒�먯뀑') || name.includes('�좏븳')));
+           ((name.includes('미국배당다우존스') || name.includes('미국배당 다우존스')) &&
+            (name.includes('SOL') || name.includes('TIGER') || name.includes('ACE') || name.includes('미래에셋') || name.includes('신한')));
 }
 
 let schdChartInstance = null;
@@ -3421,10 +3421,10 @@ function renderSchdAnalysis() {
     
     if (schdStocks.length === 0) {
         totalInvestedEl.textContent = '-';
-        sharesListEl.textContent = '蹂댁쑀 以묒씤 SCHD 愿��� 醫낅ぉ�� �놁뒿�덈떎.';
+        sharesListEl.textContent = '보유 중인 SCHD 관련 종목이 없습니다.';
         expectedDivEl.textContent = '-';
         avgYieldEl.textContent = '0.0%';
-        tbody.innerHTML = '<tr><td colspan="3" style="text-align: center; color: var(--text-secondary); padding: 2rem;">蹂댁쑀 以묒씤 SCHD援� 醫낅ぉ�� �놁뒿�덈떎.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="3" style="text-align: center; color: var(--text-secondary); padding: 2rem;">보유 중인 SCHD군 종목이 없습니다.</td></tr>';
         
         if (schdChartInstance) {
             schdChartInstance.destroy();
@@ -3452,14 +3452,14 @@ function renderSchdAnalysis() {
         const divActive = getValInActiveCurrency(div, s.currency);
         totalExpectedAnnualDiv += divActive;
         
-        sharesListTexts.push(`${s.name} (${s.ticker}): ${s.shares.toLocaleString()}二�`);
+        sharesListTexts.push(`${s.name} (${s.ticker}): ${s.shares.toLocaleString()}주`);
         
         const sharesAtStart = getSharesAtDate(s.id, startOfCurrentMonth);
         const newShares = Math.max(0, s.shares - sharesAtStart);
         if (newShares > 0) {
             const buyCost = newShares * s.avgPrice;
             thisMonthInvested += getValInActiveCurrency(buyCost, s.currency);
-            thisMonthSharesTexts.push(`${s.ticker} +${newShares.toLocaleString()}二�`);
+            thisMonthSharesTexts.push(`${s.ticker} +${newShares.toLocaleString()}주`);
         }
     });
     
@@ -3467,16 +3467,16 @@ function renderSchdAnalysis() {
     
     totalInvestedEl.innerHTML = formatCurrency(totalInvested) + 
         (thisMonthInvested > 0 
-            ? `<div style="font-size: 0.75rem; font-weight: 500; margin-top: 0.15rem;" class="kpi-trend positive">�대쾲 �� +${formatCurrency(thisMonthInvested)}</div>` 
-            : `<div style="font-size: 0.75rem; font-weight: 500; margin-top: 0.15rem; color: var(--text-secondary);">�대쾲 �� 異붽� 留ㅼ닔 �놁쓬</div>`);
+            ? `<div style="font-size: 0.75rem; font-weight: 500; margin-top: 0.15rem;" class="kpi-trend positive">이번 달 +${formatCurrency(thisMonthInvested)}</div>` 
+            : `<div style="font-size: 0.75rem; font-weight: 500; margin-top: 0.15rem; color: var(--text-secondary);">이번 달 추가 매수 없음</div>`);
             
     sharesListEl.innerHTML = sharesListTexts.join('\n') + 
         (thisMonthSharesTexts.length > 0 
-            ? `<div style="font-size: 0.75rem; font-weight: 500; color: var(--primary); margin-top: 0.25rem;">(�대쾲 �� 異붽�: ${thisMonthSharesTexts.join(', ')})</div>` 
+            ? `<div style="font-size: 0.75rem; font-weight: 500; color: var(--primary); margin-top: 0.25rem;">(이번 달 추가: ${thisMonthSharesTexts.join(', ')})</div>` 
             : '');
             
-    expectedDivEl.textContent = `${formatCurrency(totalExpectedAnnualDiv)} / �� (�뷀룊洹� ${formatCurrency(totalExpectedAnnualDiv / 12)})`;
-    avgYieldEl.textContent = `${avgYield.toFixed(2)}% (留ㅼ닔 �먭툑 ��鍮�)`;
+    expectedDivEl.textContent = `${formatCurrency(totalExpectedAnnualDiv)} / 년 (월평균 ${formatCurrency(totalExpectedAnnualDiv / 12)})`;
+    avgYieldEl.textContent = `${avgYield.toFixed(2)}% (매수 원금 대비)`;
     
     // 2. Gather Monthly historical data
     const monthsSet = new Set();
@@ -3532,7 +3532,7 @@ function renderSchdAnalysis() {
     tbody.innerHTML = '';
     
     if (tableData.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="3" style="text-align: center; color: var(--text-secondary); padding: 1.5rem;">諛곕떦湲� 吏�湲� 湲곕줉�� �놁뒿�덈떎.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="3" style="text-align: center; color: var(--text-secondary); padding: 1.5rem;">배당금 지급 기록이 없습니다.</td></tr>';
     } else {
         tableData.forEach(item => {
             const row = document.createElement('tr');
@@ -3569,7 +3569,7 @@ function renderSchdAnalysis() {
             labels: labels,
             datasets: [
                 {
-                    label: '�섎졊 諛곕떦湲�',
+                    label: '수령 배당금',
                     data: receivedData,
                     backgroundColor: 'rgba(99, 102, 241, 0.75)',
                     borderColor: '#6366f1',
@@ -3578,7 +3578,7 @@ function renderSchdAnalysis() {
                     yAxisID: 'y'
                 },
                 {
-                    label: '諛곕떦�섏씡瑜� (%)',
+                    label: '배당수익률 (%)',
                     data: yieldData,
                     type: 'line',
                     borderColor: '#34d399',
@@ -3634,7 +3634,7 @@ function renderSchdAnalysis() {
                     },
                     title: {
                         display: true,
-                        text: '�섎졊 諛곕떦湲�',
+                        text: '수령 배당금',
                         color: textColor,
                         font: { size: 10, weight: 'bold' }
                     }
@@ -3651,7 +3651,7 @@ function renderSchdAnalysis() {
                     },
                     title: {
                         display: true,
-                        text: '諛곕떦�섏씡瑜� (%)',
+                        text: '배당수익률 (%)',
                         color: textColor,
                         font: { size: 10, weight: 'bold' }
                     }
@@ -3740,15 +3740,15 @@ function renderDividendGrowthSection() {
         const loggedStockIds = [...new Set(state.dividendLogs.map(log => log.portfolioId))];
         const prevValue = select.value;
         
-        select.innerHTML = '<option value="">醫낅ぉ �좏깮</option>';
+        select.innerHTML = '<option value="">종목 선택</option>';
         loggedStockIds.forEach(id => {
             if (id.startsWith('etc-')) {
                 const accId = id.replace('etc-', '');
                 const acc = state.accounts.find(a => a.id === accId);
-                const accName = acc ? acc.name : '湲고�';
+                const accName = acc ? acc.name : '기타';
                 const option = document.createElement('option');
                 option.value = id;
-                option.textContent = `[${accName}] 湲고� (ETC)`;
+                option.textContent = `[${accName}] 기타 (ETC)`;
                 select.appendChild(option);
                 return;
             }
@@ -3756,7 +3756,7 @@ function renderDividendGrowthSection() {
             const stock = state.portfolio.find(p => p.id === id);
             if (stock) {
                 const acc = state.accounts.find(a => a.id === stock.accountId);
-                const accName = acc ? acc.name : '誘몄��� 怨꾩쥖';
+                const accName = acc ? acc.name : '미지정 계좌';
                 const option = document.createElement('option');
                 option.value = id;
                 option.textContent = `[${accName}] ${stock.name}`;
@@ -3779,7 +3779,7 @@ function renderDividendGrowthSection() {
         
         state.portfolio.forEach(stock => {
             const acc = state.accounts.find(a => a.id === stock.accountId);
-            const accName = acc ? acc.name : '誘몄��� 怨꾩쥖';
+            const accName = acc ? acc.name : '미지정 계좌';
             const option = document.createElement('option');
             option.value = stock.id;
             option.textContent = `[${accName}] ${stock.name} (${stock.ticker})`;
@@ -3830,19 +3830,19 @@ function updateDividendGrowthAnalysis() {
         
     if (dpsData.length === 0) {
         periodEl.textContent = '-';
-        startDpsEl.textContent = '湲곕줉 �놁쓬';
-        endDpsEl.textContent = '湲곕줉 �놁쓬';
+        startDpsEl.textContent = '기록 없음';
+        endDpsEl.textContent = '기록 없음';
         rateEl.textContent = '-';
         rateEl.className = 'kpi-trend';
         return;
     }
     
     if (dpsData.length === 1) {
-        periodEl.textContent = '1�� 吏�湲됰맖';
+        periodEl.textContent = '1회 지급됨';
         const item = dpsData[0];
         startDpsEl.textContent = formatCurrency(item.dps, item.currency);
         endDpsEl.textContent = formatCurrency(item.dps, item.currency);
-        rateEl.textContent = '異붿꽭 遺꾩꽍 遺덇� (理쒖냼 2�� �꾩슂)';
+        rateEl.textContent = '추세 분석 불가 (최소 2회 필요)';
         rateEl.className = 'kpi-trend';
         return;
     }
@@ -3857,7 +3857,7 @@ function updateDividendGrowthAnalysis() {
     const currency = firstItem.currency;
     
     const formatDate = (d) => `${d.getFullYear()}.${String(d.getMonth() + 1).padStart(2, '0')}`;
-    periodEl.textContent = `${formatDate(firstDate)} ~ ${formatDate(lastDate)} (${Math.round(daysDiff)}��)`;
+    periodEl.textContent = `${formatDate(firstDate)} ~ ${formatDate(lastDate)} (${Math.round(daysDiff)}일)`;
     
     // Log-Linear Regression (OLS)
     // ln(DPS) = alpha + beta * t
@@ -3889,8 +3889,8 @@ function updateDividendGrowthAnalysis() {
     const dpsStartEst = Math.exp(alpha);
     const dpsEndEst = Math.exp(alpha + beta * totalYears);
     
-    startDpsEl.textContent = `${formatCurrency(dpsStartEst, currency)} (異붿꽭��)`;
-    endDpsEl.textContent = `${formatCurrency(dpsEndEst, currency)} (異붿꽭��)`;
+    startDpsEl.textContent = `${formatCurrency(dpsStartEst, currency)} (추세선)`;
+    endDpsEl.textContent = `${formatCurrency(dpsEndEst, currency)} (추세선)`;
     
     const totalGrowth = dpsStartEst > 0 ? ((dpsEndEst - dpsStartEst) / dpsStartEst) * 100 : 0;
     const cagr = (Math.exp(beta) - 1) * 100;
@@ -3900,9 +3900,9 @@ function updateDividendGrowthAnalysis() {
     const plClass = totalGrowth >= 0 ? 'positive' : 'negative';
     
     if (daysDiff < 90) {
-        rateEl.textContent = `${sign}${totalGrowth.toFixed(2)}% (�④린 異붿꽭 �깆옣瑜�)`;
+        rateEl.textContent = `${sign}${totalGrowth.toFixed(2)}% (단기 추세 성장률)`;
     } else {
-        rateEl.textContent = `${sign}${totalGrowth.toFixed(1)}% (�고룊洹� CAGR: ${cagrSign}${cagr.toFixed(2)}%)`;
+        rateEl.textContent = `${sign}${totalGrowth.toFixed(1)}% (연평균 CAGR: ${cagrSign}${cagr.toFixed(2)}%)`;
     }
     rateEl.className = `kpi-trend ${plClass}`;
 }
@@ -4024,24 +4024,24 @@ function runTrendForecasting() {
     }
     
     // 4. Render Trend Increment
-    trendIncrementEl.textContent = `+${formatCurrency(delta)} / ��`;
+    trendIncrementEl.textContent = `+${formatCurrency(delta)} / 월`;
     
     // 5. Update labels dynamically depending on selected basis
     const labelEl = document.getElementById('fcTrendLabel');
     if (labelEl) {
         if (basis === 'actual') {
-            labelEl.textContent = '理쒓렐 3媛쒖썡媛� 諛곕떦 �ㅼ닔�뱀븸 利앷�異붿꽭 (�뷀룊洹�)';
+            labelEl.textContent = '최근 3개월간 배당 실수령액 증가추세 (월평균)';
         } else {
-            labelEl.textContent = '理쒓렐 3媛쒖썡媛� 諛곕떦 泥대젰(諛곕떦��) 利앷�異붿꽭 (�뷀룊洹�)';
+            labelEl.textContent = '최근 3개월간 배당 체력(배당력) 증가추세 (월평균)';
         }
     }
 
     const descEl = document.querySelector('#fcTrendIncrement + p');
     if (descEl) {
         if (basis === 'actual') {
-            descEl.textContent = '* 理쒓렐 3媛쒖썡媛� �ㅼ젣 �섎졊�� 珥� 諛곕떦湲덉쓽 �뷀룊洹� 利앷��⑥쓣 諛뷀깢�쇰줈 誘몃옒 諛곕떦 �꾧툑 �먮쫫�� �좏삎�쇰줈 �덉륫�⑸땲��. (吏�湲� 二쇨린�� �곕Ⅸ �붾퀎 蹂��숈꽦�� 諛섏쁺�� �� �덉뒿�덈떎.)';
+            descEl.textContent = '* 최근 3개월간 실제 수령한 총 배당금의 월평균 증가율을 바탕으로 미래 배당 현금 흐름을 선형으로 예측합니다. (지급 주기에 따른 월별 변동성이 반영될 수 있습니다.)';
         } else {
-            descEl.textContent = '* 理쒓렐 3媛쒖썡 �숈븞 留ㅼ닔 �깆쓣 �듯빐 �ы듃�대━�ㅼ쓽 �붾같�� �앹꽦 �λ젰(諛곕떦��)�� 留ㅻ떖 �됯퇏�곸쑝濡� �쇰쭏�� 利앷��덈뒗吏�瑜� 諛뷀깢�쇰줈 �좏삎 �덉륫�⑸땲��.';
+            descEl.textContent = '* 최근 3개월 동안 매수 등을 통해 포트폴리오의 월배당 생성 능력(배당력)이 매달 평균적으로 얼마나 증가했는지를 바탕으로 선형 예측합니다.';
         }
     }
     
@@ -4065,7 +4065,7 @@ function runTrendForecasting() {
         const row = document.createElement('tr');
         row.style.borderBottom = '1px solid var(--border-color)';
         row.innerHTML = `
-            <td style="padding: 0.4rem 0;">${m}媛쒖썡 ��</td>
+            <td style="padding: 0.4rem 0;">${m}개월 후</td>
             <td style="padding: 0.4rem 0; text-align: right; font-weight: 600; color: var(--primary);">${formatCurrency(projectedVal)}</td>
         `;
         tbody.appendChild(row);
@@ -4073,7 +4073,7 @@ function runTrendForecasting() {
 }
 
 // ============================================================================
-// AI �댁떆�ㅽ꽩�� 梨쀫큸 湲곕뒫 (Gemini API �곕룞)
+// AI 어시스턴트 챗봇 기능 (Gemini API 연동)
 // ============================================================================
 function setupAIChat() {
     const btnOpen = document.getElementById('btnOpenAIChat');
@@ -4097,10 +4097,10 @@ function setupAIChat() {
         inputKey.value = key;
         if (key) {
             statusDot.className = 'status-dot online';
-            statusDot.title = 'API �ㅺ� �ㅼ젙�섏뿀�듬땲�� (�⑤씪��)';
+            statusDot.title = 'API 키가 설정되었습니다 (온라인)';
         } else {
             statusDot.className = 'status-dot offline';
-            statusDot.title = 'API �� 誘몄꽕�� (�ㅽ봽�쇱씤)';
+            statusDot.title = 'API 키 미설정 (오프라인)';
         }
     };
     loadApiKey();
@@ -4132,9 +4132,9 @@ function setupAIChat() {
         localStorage.setItem('dividend_tracker_gemini_key', key);
         loadApiKey();
         overlay.style.display = 'none';
-        showToast('Gemini API Key媛� ���λ릺�덉뒿�덈떎.', 'success');
+        showToast('Gemini API Key가 저장되었습니다.', 'success');
         
-        appendMessage('system', 'API Key媛� �깃났�곸쑝濡� �낅뜲�댄듃�섏뿀�듬땲��. �댁젣 遺꾩꽍�� �쒖옉�� �� �덉뒿�덈떎!');
+        appendMessage('system', 'API Key가 성공적으로 업데이트되었습니다. 이제 분석을 시작할 수 있습니다!');
     });
 
     // Chat Message append helper
@@ -4151,7 +4151,7 @@ function setupAIChat() {
     // Construct the LLM Context Prompt
     const buildPromptContext = () => {
         const activeCurrency = state.activeCurrency || 'KRW';
-        const exchangeRate = state.currentExchangeRate || '誘몄“��';
+        const exchangeRate = state.currentExchangeRate || '미조회';
         const safeAccounts = state.accounts.map(({ id, name, type }) => ({ id, name, type }));
 
         // Simplify portfolio and logs for context window optimization
@@ -4159,7 +4159,7 @@ function setupAIChat() {
             const acc = state.accounts.find(a => a.id === s.accountId);
             return {
                 id: s.id,
-                account: acc ? acc.name : '誘몄���',
+                account: acc ? acc.name : '미지정',
                 name: s.name,
                 ticker: s.ticker,
                 shares: s.shares,
@@ -4173,40 +4173,40 @@ function setupAIChat() {
             const stock = state.portfolio.find(p => p.id === l.portfolioId);
             return {
                 date: l.date,
-                ticker: stock ? stock.ticker : '湲고�',
-                name: stock ? stock.name : '湲고�',
+                ticker: stock ? stock.ticker : '기타',
+                name: stock ? stock.name : '기타',
                 amount: l.amount,
                 currency: l.currency,
                 amountKRW: l.amountKRW
             };
         });
 
-        return `��븷: 諛곕떦 �깆옣 �ъ옄 �꾨Ц 湲덉쑖 AI �댁떆�ㅽ꽩��
-�ъ슜�먯쓽 �몄뼱: �쒓뎅��
+        return `역할: 배당 성장 투자 전문 금융 AI 어시스턴트
+사용자의 언어: 한국어
 
-�꾩옱 �ъ슜�먯쓽 �ы듃�대━�� �곗씠�� �뺣낫:
-- �쒖떆 �듯솕: ${activeCurrency}
-- �곸슜 �섏쑉: ${exchangeRate} KRW/USD
-- �깅줉 怨꾩쥖 紐⑸줉: ${JSON.stringify(safeAccounts)}
-- 蹂댁쑀 二쇱떇 �ы듃�대━��: ${JSON.stringify(simplifiedPortfolio)}
-- 理쒓렐 15媛� 諛곕떦湲� �섎졊 �댁뿭: ${JSON.stringify(simplifiedLogs)}
+현재 사용자의 포트폴리오 데이터 정보:
+- 표시 통화: ${activeCurrency}
+- 적용 환율: ${exchangeRate} KRW/USD
+- 등록 계좌 목록: ${JSON.stringify(safeAccounts)}
+- 보유 주식 포트폴리오: ${JSON.stringify(simplifiedPortfolio)}
+- 최근 15개 배당금 수령 내역: ${JSON.stringify(simplifiedLogs)}
 
-誘몄뀡:
-1. �ъ슜�먯쓽 諛곕떦 �꾪솴 遺꾩꽍, �뱀젙 醫낅ぉ 異붿쿇, �덉긽 諛곕떦 諛� �ы듃�대━�� 議곗뼵 �붽뎄�� �곸꽭�섍쾶 �듯빀�덈떎.
-2. 留뚯빟 �ъ슜�먭� ���붾줈 �덈줈�� 二쇱떇 痍⑤뱷�대굹 諛곕떦湲� �섎졊�� 湲곕줉�대떖�쇨퀬 �붿껌�� 寃쎌슦(��: "�ㅻ뒛 SCHD 10二� 78�щ윭�� ���� 湲곕줉�댁쨾" �먮뒗 "�댁젣 由ъ뼹�곗씤而� 諛곕떦 �몄쟾 39�щ윭 諛쏆븯�� �곸뼱以�"), �대떦 紐낅졊�� �ㅼ젣 �ы듃�대━�� �깆뿉 湲곕줉�섍린 �꾪빐 �듬� 媛��� 留덉�留� 以꾩뿉 �뺥솗�� �묒떇�� JSON �≪뀡 釉붾줉�� �좎씪�섍쾶 �ы븿�쒖폒�� �⑸땲��.
+미션:
+1. 사용자의 배당 현황 분석, 특정 종목 추천, 예상 배당 및 포트폴리오 조언 요구에 상세하게 답합니다.
+2. 만약 사용자가 대화로 새로운 주식 취득이나 배당금 수령을 기록해달라고 요청할 경우(예: "오늘 SCHD 10주 78달러에 샀어 기록해줘" 또는 "어제 리얼티인컴 배당 세전 39달러 받았어 적어줘"), 해당 명령을 실제 포트폴리오 앱에 기록하기 위해 답변 가장 마지막 줄에 정확한 양식의 JSON 액션 블록을 유일하게 포함시켜야 합니다.
 
-�≪뀡 媛��ν븳 JSON �щ㎎ 醫낅쪟 (�듬� 留� 留덉�留� 以꾩뿉 �� �섎굹留� 異쒕젰�댁빞 ��):
-1. 異붽� 留ㅼ닔 湲곕줉 (buy_more):
+액션 가능한 JSON 포맷 종류 (답변 맨 마지막 줄에 단 하나만 출력해야 함):
+1. 추가 매수 기록 (buy_more):
 {"action": "buy_more", "ticker": "SCHD", "shares": 10, "price": 78.2, "date": "2026-06-28"}
 
-2. 諛곕떦湲� �섎졊 湲곕줉 (record_dividend):
+2. 배당금 수령 기록 (record_dividend):
 {"action": "record_dividend", "ticker": "O", "amount": 39.0, "tax": 5.85, "date": "2026-06-28", "currency": "USD"}
 
-二쇱쓽�ы빆: 
-- JSON �≪뀡 �щ㎎�� 異쒕젰�� �뚮뒗 �ъ슜�먭� 紐낇솗�섍쾶 '湲곕줉�댁쨾', '�곸뼱以�', '諛섏쁺�댁쨾'�쇨퀬 吏��쒗뻽�� �뚮쭔 �ъ슜�⑸땲��.
-- �좎쭨(date)媛� �놁쑝硫� �ㅻ뒛 �좎쭨(�꾩� 湲곗�: ${core.localDateString()})濡� 湲곕낯 湲곗엯�⑸땲��.
-- 醫낅ぉ�� �ъ슜�먭� �쒓났�� �쒓�紐낆씠�� �곗빱瑜� �쒖슜�� �ы듃�대━�ㅼ뿉�� 留ㅼ묶�섏떗�쒖삤.
-- �듬��� �꾨Ц�곸씠怨� 移쒓렐�� �댁“濡� �묒꽦�� 二쇱꽭��.`;
+주의사항: 
+- JSON 액션 포맷을 출력할 때는 사용자가 명확하게 '기록해줘', '적어줘', '반영해줘'라고 지시했을 때만 사용합니다.
+- 날짜(date)가 없으면 오늘 날짜(현지 기준: ${core.localDateString()})로 기본 기입합니다.
+- 종목은 사용자가 제공한 한글명이나 티커를 활용해 포트폴리오에서 매칭하십시오.
+- 답변은 전문적이고 친근한 어조로 작성해 주세요.`;
     };
 
     // Process LLM Response JSON Action
@@ -4222,7 +4222,7 @@ function setupAIChat() {
                 const { ticker, shares, price, date } = actionData;
                 const stock = state.portfolio.find(p => p.ticker.toUpperCase() === ticker.toUpperCase() || p.name.includes(ticker));
                 if (!stock) {
-                    return `�좑툘 �ы듃�대━�ㅼ뿉 �깅줉�섏� �딆� 醫낅ぉ(${ticker})�낅땲��. 異붽� 留ㅼ닔瑜� 湲곕줉�섎젮硫� 癒쇱� �먯궛愿�由� 硫붾돱�먯꽌 �대떦 醫낅ぉ�� �ы듃�대━�ㅼ뿉 異붽��� 二쇱꽭��.`;
+                    return `⚠️ 포트폴리오에 등록되지 않은 종목(${ticker})입니다. 추가 매수를 기록하려면 먼저 자산관리 메뉴에서 해당 종목을 포트폴리오에 추가해 주세요.`;
                 }
 
                 const buyDate = date || core.localDateString();
@@ -4250,14 +4250,14 @@ function setupAIChat() {
                 
                 saveState();
                 renderAll();
-                return `�� **�먮룞 異붽�留ㅼ닔 湲곗엯 �깃났**\n醫낅ぉ: ${stock.name} (${stock.ticker})\n異붽� �섎웾: +${shares}二� (珥� 蹂댁쑀: ${newTotalShares}二�)\n�섏젙�� �됰떒媛�: ${formatCurrency(stock.avgPrice, stock.currency)}`;
+                return `✅ **자동 추가매수 기입 성공**\n종목: ${stock.name} (${stock.ticker})\n추가 수량: +${shares}주 (총 보유: ${newTotalShares}주)\n수정된 평단가: ${formatCurrency(stock.avgPrice, stock.currency)}`;
             }
 
             if (actionData.action === 'record_dividend') {
                 const { ticker, amount, tax, date, currency } = actionData;
                 const stock = state.portfolio.find(p => p.ticker.toUpperCase() === ticker.toUpperCase() || p.name.includes(ticker));
                 if (!stock) {
-                    return `�좑툘 �ы듃�대━�ㅼ뿉 �깅줉�섏� �딆� 醫낅ぉ(${ticker})�낅땲��. 諛곕떦�� �섎졊�섎젮硫� 醫낅ぉ�� 癒쇱� �ы듃�대━�ㅼ뿉 異붽��섏뼱 �덉뼱�� �⑸땲��.`;
+                    return `⚠️ 포트폴리오에 등록되지 않은 종목(${ticker})입니다. 배당을 수령하려면 종목이 먼저 포트폴리오에 추가되어 있어야 합니다.`;
                 }
 
                 const logDate = date || core.localDateString();
@@ -4271,7 +4271,7 @@ function setupAIChat() {
                 if (logCurrency === 'USD') {
                     const rateResult = await getHistoricalExchangeRate(logDate);
                     if (!rateResult.ok) {
-                        return `�좑툘 ${logDate} 怨쇨굅 �섏쑉�� �뺤젙�섏� 紐삵빐 諛곕떦 湲곕줉�� ���ν븯吏� �딆븯�듬땲��. �쇰컲 諛곕떦 �낅젰 李쎌뿉�� �섏쑉�� 吏곸젒 �뺤씤�� 二쇱꽭��.`;
+                        return `⚠️ ${logDate} 과거 환율을 확정하지 못해 배당 기록을 저장하지 않았습니다. 일반 배당 입력 창에서 환율을 직접 확인해 주세요.`;
                     }
                     rate = rateResult.rate;
                     rateDate = rateResult.rateDate;
@@ -4300,11 +4300,11 @@ function setupAIChat() {
                 
                 saveState();
                 renderAll();
-                return `�� **�먮룞 諛곕떦�섎졊 湲곗엯 �깃났**\n醫낅ぉ: ${stock.name} (${stock.ticker})\n�섎졊 諛곕떦湲�: ${formatCurrency(logAmount, logCurrency)} (�몄쟾)\n�섎졊 湲곗���: ${logDate}`;
+                return `✅ **자동 배당수령 기입 성공**\n종목: ${stock.name} (${stock.ticker})\n수령 배당금: ${formatCurrency(logAmount, logCurrency)} (세전)\n수령 기준일: ${logDate}`;
             }
         } catch (e) {
             console.error("Action execution error:", e);
-            return "�좑툘 AI媛� 湲곗엯�� �쒕룄�덉쑝�� 紐낅졊 �뺤떇�� �щ컮瑜댁� �딆븘 諛섏쁺�섏� 紐삵뻽�듬땲��.";
+            return "⚠️ AI가 기입을 시도했으나 명령 형식이 올바르지 않아 반영하지 못했습니다.";
         }
         return null;
     };
@@ -4323,12 +4323,12 @@ function setupAIChat() {
         // Retrieve API Key
         const apiKey = localStorage.getItem('dividend_tracker_gemini_key');
         if (!apiKey) {
-            appendMessage('ai', '二꾩넚�⑸땲��. 諛곕떦 鍮꾩꽌瑜� �ъ슜�섎젮硫� �곗긽�⑥쓽 **�댁뇿 �꾩씠肄�**�� �대┃�� **Google Gemini API Key**瑜� �ㅼ젙�� 二쇱뀛�� �⑸땲��.');
+            appendMessage('ai', '죄송합니다. 배당 비서를 사용하려면 우상단의 **열쇠 아이콘**을 클릭해 **Google Gemini API Key**를 설정해 주셔야 합니다.');
             return;
         }
 
         // Add typing indicator
-        const typingIndicator = appendMessage('ai', '鍮꾩꽌媛� �앷컖 以묒엯�덈떎...');
+        const typingIndicator = appendMessage('ai', '비서가 생각 중입니다...');
 
         try {
             const context = buildPromptContext();
@@ -4342,7 +4342,7 @@ function setupAIChat() {
                     contents: [
                         {
                             role: 'user',
-                            parts: [{ text: `${context}\n\n�ъ슜�� 臾몄쓽: ${userText}` }]
+                            parts: [{ text: `${context}\n\n사용자 문의: ${userText}` }]
                         }
                     ],
                     generationConfig: {
@@ -4352,11 +4352,11 @@ function setupAIChat() {
             });
 
             if (!response.ok) {
-                throw new Error('API �붿껌 �ㅽ뙣');
+                throw new Error('API 요청 실패');
             }
 
             const data = await response.json();
-            const rawText = data.candidates?.[0]?.content?.parts?.[0]?.text || '二꾩넚�⑸땲��. �듬��� �앹꽦�섏� 紐삵뻽�듬땲��.';
+            const rawText = data.candidates?.[0]?.content?.parts?.[0]?.text || '죄송합니다. 답변을 생성하지 못했습니다.';
 
             // Remove typing indicator
             messagesContainer.removeChild(typingIndicator);
@@ -4376,7 +4376,7 @@ function setupAIChat() {
         } catch (error) {
             console.error("AI Assistant Error:", error);
             messagesContainer.removeChild(typingIndicator);
-            appendMessage('ai', '�좑툘 �쒕쾭�� �듭떊�섎뒗 �숈븞 �먮윭媛� 諛쒖깮�덉뒿�덈떎. API �ㅺ� �좏슚�쒖� �뺤씤�섍퀬 �좎떆 �� �ㅼ떆 �쒕룄�� 二쇱꽭��.');
+            appendMessage('ai', '⚠️ 서버와 통신하는 동안 에러가 발생했습니다. API 키가 유효한지 확인하고 잠시 후 다시 시도해 주세요.');
         }
     };
 
@@ -4389,7 +4389,7 @@ function setupAIChat() {
 }
 
 // ============================================================================
-// PWA �쒕퉬�� �뚯빱 諛� 援ш� �쒕씪�대툕 �대씪�곕뱶 �숆린�� 湲곕뒫
+// PWA 서비스 워커 및 구글 드라이브 클라우드 동기화 기능
 // ============================================================================
 
 let pendingServiceWorker = null;
@@ -4397,7 +4397,7 @@ let pendingServiceWorker = null;
 function setupVersionUI() {
     const versionEl = document.getElementById('appVersion');
     const applyBtn = document.getElementById('btnApplyUpdate');
-    if (versionEl) versionEl.textContent = `踰꾩쟾 ${APP_VERSION}`;
+    if (versionEl) versionEl.textContent = `버전 ${APP_VERSION}`;
     if (applyBtn) {
         applyBtn.addEventListener('click', () => {
             if (pendingServiceWorker) pendingServiceWorker.postMessage({ type: 'SKIP_WAITING' });
@@ -4411,7 +4411,7 @@ function showServiceWorkerUpdate(worker) {
     if (applyBtn) applyBtn.style.display = 'inline-flex';
 }
 
-// PWA �쒕퉬�� �뚯빱 �깅줉
+// PWA 서비스 워커 등록
 if ('serviceWorker' in navigator) {
     let reloadingForUpdate = false;
     navigator.serviceWorker.addEventListener('controllerchange', () => {
@@ -4463,8 +4463,8 @@ function preserveSyncConflict(localLedger, remoteLedger, reason) {
     localStorage.setItem(`dividend_sync_conflict_local_${stamp}`, JSON.stringify(localLedger));
     localStorage.setItem(`dividend_sync_conflict_remote_${stamp}`, JSON.stringify(remoteLedger));
     const syncLog = document.getElementById('gDriveSyncLog');
-    if (syncLog) syncLog.textContent = `�숆린�� 異⑸룎 媛먯�: ${reason}. �묒そ �щ낯�� �� 釉뚮씪�곗��� 蹂댁〈�덉뒿�덈떎.`;
-    showToast('Drive �숆린�� 異⑸룎�� 媛먯��� �묒そ �щ낯�� 蹂댁〈�덉뒿�덈떎.', 'warning');
+    if (syncLog) syncLog.textContent = `동기화 충돌 감지: ${reason}. 양쪽 사본을 이 브라우저에 보존했습니다.`;
+    showToast('Drive 동기화 충돌을 감지해 양쪽 사본을 보존했습니다.', 'warning');
 }
 
 function queueGDrivePush() {
@@ -4495,7 +4495,7 @@ function setupGDriveSync() {
     inputClientId.value = savedClientId;
     if (inputWorkerUrl) inputWorkerUrl.value = localStorage.getItem('price_worker_url') || '';
 
-    const updateUI = (isLoggedIn, accountText = '�곕룞�섏뼱 �덉� �딆쓬') => {
+    const updateUI = (isLoggedIn, accountText = '연동되어 있지 않음') => {
         if (isLoggedIn) {
             btnLogin.style.display = 'none';
             btnLogout.style.display = 'inline-flex';
@@ -4504,17 +4504,17 @@ function setupGDriveSync() {
             btnPush.disabled = false;
             if (statusDot) {
                 statusDot.className = 'status-dot online';
-                statusDot.title = `援ш� �곕룞�� (${accountText})`;
+                statusDot.title = `구글 연동됨 (${accountText})`;
             }
         } else {
             btnLogin.style.display = 'inline-flex';
             btnLogout.style.display = 'none';
-            txtAccount.textContent = '�곕룞�섏뼱 �덉� �딆쓬';
+            txtAccount.textContent = '연동되어 있지 않음';
             btnPull.disabled = true;
             btnPush.disabled = true;
             if (statusDot) {
                 statusDot.className = 'status-dot offline';
-                statusDot.title = '援ш� 誘몄뿰��';
+                statusDot.title = '구글 미연동';
             }
         }
     };
@@ -4532,9 +4532,9 @@ function setupGDriveSync() {
                 scope: 'https://www.googleapis.com/auth/drive.appdata',
                 callback: async (resp) => {
                     if (resp.error !== undefined) {
-                        showToast('援ш� �곕룞 �ㅽ뙣: ' + resp.error, 'danger');
+                        showToast('구글 연동 실패: ' + resp.error, 'danger');
                         updateUI(false);
-                        updateLog('�곕룞 �ㅽ뙣: ' + resp.error);
+                        updateLog('연동 실패: ' + resp.error);
                         return;
                     }
                     
@@ -4542,7 +4542,7 @@ function setupGDriveSync() {
                     gDriveTokenExpiresAt = Date.now() + ((Number(resp.expires_in) || 3600) * 1000);
                     gDriveInitialPullComplete = false;
                     localStorage.setItem('gdrive_logged_in', 'true');
-                    updateLog('�몄쬆 �꾨즺. API �쇱씠釉뚮윭由� 濡쒕뵫 以�...');
+                    updateLog('인증 완료. API 라이브러리 로딩 중...');
 
                     // Load gapi client
                     if (typeof gapi !== 'undefined') {
@@ -4552,7 +4552,7 @@ function setupGDriveSync() {
                                 await gapi.client.load('drive', 'v3');
                                 
                                 // Query drive info to fetch account name
-                                let email = '援ш� 怨꾩젙';
+                                let email = '구글 계정';
                                 try {
                                     const about = await gapi.client.drive.about.get({ fields: 'user' });
                                     email = about.result?.user?.emailAddress || email;
@@ -4560,14 +4560,14 @@ function setupGDriveSync() {
                                     console.warn('Drive account label unavailable:', aboutError);
                                 }
                                 updateUI(true, email);
-                                updateLog('�깃났�곸쑝濡� �곕룞�섏뿀�듬땲��.');
+                                updateLog('성공적으로 연동되었습니다.');
                                 
                                 // Auto pull on first login
                                 await pullStateFromGDrive();
                             } catch (e) {
                                 console.error(e);
-                                updateUI(true, '�곕룞 �꾨즺');
-                                updateLog('�곕룞 �깃났 (怨꾩젙 議고쉶 �쒗븳��)');
+                                updateUI(true, '연동 완료');
+                                updateLog('연동 성공 (계정 조회 제한됨)');
                             }
                         });
                     }
@@ -4588,7 +4588,7 @@ function setupGDriveSync() {
                 if (parsed.protocol !== 'https:' && parsed.hostname !== 'localhost' && parsed.hostname !== '127.0.0.1') throw new Error();
                 localStorage.setItem('price_worker_url', workerUrl);
             } catch (_) {
-                showToast('Worker 二쇱냼�� HTTPS URL�댁뼱�� �⑸땲��.', 'warning');
+                showToast('Worker 주소는 HTTPS URL이어야 합니다.', 'warning');
                 return;
             }
         } else {
@@ -4596,7 +4596,7 @@ function setupGDriveSync() {
         }
         if (!clientId) {
             localStorage.removeItem('gdrive_client_id');
-            showToast('�� �ㅼ젙�� ���λ릺�덉뒿�덈떎.', 'success');
+            showToast('앱 설정이 저장되었습니다.', 'success');
             updateUI(false);
             document.querySelectorAll('.modal-backdrop').forEach(modal => modal.classList.remove('open'));
             return;
@@ -4604,8 +4604,8 @@ function setupGDriveSync() {
 
         localStorage.setItem('gdrive_client_id', clientId);
         initTokenClient(clientId);
-        showToast('援ш� �대씪�댁뼵�� ID媛� ���λ릺�덉뒿�덈떎.', 'success');
-        updateLog('�대씪�댁뼵�� ID ���λ맖. 濡쒓렇�몄쓣 吏꾪뻾�� 二쇱꽭��.');
+        showToast('구글 클라이언트 ID가 저장되었습니다.', 'success');
+        updateLog('클라이언트 ID 저장됨. 로그인을 진행해 주세요.');
         document.querySelectorAll('.modal-backdrop').forEach(modal => modal.classList.remove('open'));
     });
 
@@ -4613,7 +4613,7 @@ function setupGDriveSync() {
     btnLogin.addEventListener('click', () => {
         const clientId = localStorage.getItem('gdrive_client_id');
         if (!clientId) {
-            alert('援ш� 濡쒓렇�� �� 1�④퀎�먯꽌 Client ID瑜� 癒쇱� �ㅼ젙�섍퀬 �ㅼ젙 �꾨즺 踰꾪듉�� �뚮윭二쇱꽭��.');
+            alert('구글 로그인 전 1단계에서 Client ID를 먼저 설정하고 설정 완료 버튼을 눌러주세요.');
             return;
         }
         if (!gDriveTokenClient) {
@@ -4622,7 +4622,7 @@ function setupGDriveSync() {
         if (gDriveTokenClient) {
             gDriveTokenClient.requestAccessToken({ prompt: 'consent' });
         } else {
-            alert('援ш� API媛� �꾩쭅 以�鍮꾨릺吏� �딆븯�듬땲��. �좎떆 �� �ㅼ떆 �쒕룄�� 二쇱꽭��.');
+            alert('구글 API가 아직 준비되지 않았습니다. 잠시 후 다시 시도해 주세요.');
         }
     });
 
@@ -4637,8 +4637,8 @@ function setupGDriveSync() {
         gDriveFileId = null;
         localStorage.removeItem('gdrive_logged_in');
         updateUI(false);
-        updateLog('�곕룞�� �댁젣�섏뿀�듬땲��.');
-        showToast('援ш� 怨꾩젙 �곕룞�� �댁젣�덉뒿�덈떎.', 'success');
+        updateLog('연동이 해제되었습니다.');
+        showToast('구글 계정 연동을 해제했습니다.', 'success');
     });
 
     // Manual PULL
@@ -4669,7 +4669,7 @@ function setupGDriveSync() {
             setTimeout(() => {
                 initTokenClient(savedClientId);
                 if (localStorage.getItem('gdrive_logged_in') === 'true' && gDriveTokenClient) {
-                    updateLog('�먮룞 �곕룞 �ъ뿰寃� 以�...');
+                    updateLog('자동 연동 재연결 중...');
                     gDriveTokenClient.requestAccessToken({ prompt: '' }); // Silent token request
                 }
             }, 1000);
@@ -4682,8 +4682,8 @@ async function pushStateToGDrive() {
     if (storageWriteBlocked || !gDriveAccessToken || !gDriveInitialPullComplete || gDrivePullInProgress) return;
     const syncLog = document.getElementById('gDriveSyncLog');
     try {
-        if (gDriveTokenExpiresAt && Date.now() >= gDriveTokenExpiresAt) throw new Error('�몄쬆 �좏겙 留뚮즺. �ㅼ떆 濡쒓렇�명빐 二쇱꽭��.');
-        if (syncLog) syncLog.textContent = '�대씪�곕뱶�� �λ� ���� 以�...';
+        if (gDriveTokenExpiresAt && Date.now() >= gDriveTokenExpiresAt) throw new Error('인증 토큰 만료. 다시 로그인해 주세요.');
+        if (syncLog) syncLog.textContent = '클라우드에 장부 저장 중...';
         const ledger = core.createCloudLedgerSnapshot(state);
 
         if (!gDriveFileId) {
@@ -4703,7 +4703,7 @@ async function pushStateToGDrive() {
                 const remoteRes = await fetchJsonWithTimeout(`https://www.googleapis.com/drive/v3/files/${gDriveFileId}?alt=media`, {
                     headers: { 'Authorization': 'Bearer ' + gDriveAccessToken }
                 }, 10000);
-                preserveSyncConflict(ledger, remoteRes.data, '�ㅻⅨ 湲곌린�먯꽌 �뚯씪�� 蹂�寃쎈맖');
+                preserveSyncConflict(ledger, remoteRes.data, '다른 기기에서 파일이 변경됨');
                 return;
             }
         }
@@ -4730,17 +4730,17 @@ async function pushStateToGDrive() {
             },
             body
         }, 15000);
-        if (!response.ok) throw new Error(`�대씪�곕뱶 �낅줈�� �ㅽ뙣 (${response.status})`);
+        if (!response.ok) throw new Error(`클라우드 업로드 실패 (${response.status})`);
         gDriveFileId = file.id || gDriveFileId;
         gDriveRemoteModifiedTime = file.modifiedTime || gDriveRemoteModifiedTime;
         gDriveBaselineFingerprint = fingerprintLedger(ledger);
-        if (syncLog) syncLog.textContent = `理쒓렐 �λ� ����: ${new Date().toLocaleTimeString()}`;
+        if (syncLog) syncLog.textContent = `최근 장부 저장: ${new Date().toLocaleTimeString()}`;
     } catch (err) {
-        if (/401|�좏겙 留뚮즺/.test(err.message)) {
+        if (/401|토큰 만료/.test(err.message)) {
             gDriveAccessToken = null;
             gDriveInitialPullComplete = false;
         }
-        if (syncLog) syncLog.textContent = '���� �ㅽ뙣: ' + err.message;
+        if (syncLog) syncLog.textContent = '저장 실패: ' + err.message;
     }
 }
 
@@ -4751,7 +4751,7 @@ async function pullStateFromGDrive() {
     gDrivePullInProgress = true;
     let pullSucceeded = false;
     try {
-        if (syncLog) syncLog.textContent = '�대씪�곕뱶 �곗씠�� 議고쉶 以�...';
+        if (syncLog) syncLog.textContent = '클라우드 데이터 조회 중...';
         const response = await gapi.client.drive.files.list({
             spaces: 'appDataFolder',
             q: "name = 'portfolio_state.json'",
@@ -4760,7 +4760,7 @@ async function pullStateFromGDrive() {
         });
         const files = response.result.files;
         if (!files || files.length === 0) {
-            if (syncLog) syncLog.textContent = '�대씪�곕뱶 �곗씠�� �놁쓬. 濡쒖뺄 �곗씠�곕줈 �뚯씪 �앹꽦 以�...';
+            if (syncLog) syncLog.textContent = '클라우드 데이터 없음. 로컬 데이터로 파일 생성 중...';
             gDriveInitialPullComplete = true;
             gDrivePullInProgress = false;
             await pushStateToGDrive();
@@ -4772,30 +4772,30 @@ async function pullStateFromGDrive() {
         const { response: fileRes, data: cloudState } = await fetchJsonWithTimeout(`https://www.googleapis.com/drive/v3/files/${gDriveFileId}?alt=media`, {
             headers: { 'Authorization': 'Bearer ' + gDriveAccessToken }
         }, 10000);
-        if (!fileRes.ok) throw new Error(`�뚯씪 �ㅼ슫濡쒕뱶 �먮윭 (${fileRes.status})`);
+        if (!fileRes.ok) throw new Error(`파일 다운로드 에러 (${fileRes.status})`);
         if (cloudState && (cloudState.portfolio || cloudState.dividendLogs)) {
             const localLedger = core.createCloudLedgerSnapshot(state);
             const remoteFingerprint = fingerprintLedger(cloudState);
             const localFingerprint = fingerprintLedger(localLedger);
             if (localFingerprint !== remoteFingerprint && gDriveBaselineFingerprint && localFingerprint !== gDriveBaselineFingerprint) {
-                preserveSyncConflict(localLedger, cloudState, '濡쒖뺄怨� �먭꺽 �λ�媛� 紐⑤몢 蹂�寃쎈맖');
+                preserveSyncConflict(localLedger, cloudState, '로컬과 원격 장부가 모두 변경됨');
                 return;
             }
             if (!gDriveBaselineFingerprint && localFingerprint !== remoteFingerprint &&
                 (localLedger.accounts.length || localLedger.portfolio.length || localLedger.dividendLogs.length)) {
-                preserveSyncConflict(localLedger, cloudState, '泥� �숆린�� �� 濡쒖뺄 �λ��� �먭꺽 �λ�媛� �ㅻ쫫');
+                preserveSyncConflict(localLedger, cloudState, '첫 동기화 전 로컬 장부와 원격 장부가 다름');
             }
             state = core.mergeCloudLedger(state, cloudState);
             persistLocalState();
             renderAll();
             gDriveBaselineFingerprint = remoteFingerprint;
             const timeStr = new Date().toLocaleTimeString();
-            if (syncLog) syncLog.textContent = `理쒓렐 �λ� 遺덈윭�ㅺ린: ${timeStr}`;
-            showToast('援ш� �쒕씪�대툕 �λ�瑜� �숆린�뷀뻽�듬땲��. �� 湲곌린�� �쒖꽭 罹먯떆�� �좎��덉뒿�덈떎.', 'success');
+            if (syncLog) syncLog.textContent = `최근 장부 불러오기: ${timeStr}`;
+            showToast('구글 드라이브 장부를 동기화했습니다. 이 기기의 시세 캐시는 유지했습니다.', 'success');
         }
         pullSucceeded = true;
     } catch (err) {
-        if (syncLog) syncLog.textContent = '�ㅼ슫濡쒕뱶 �ㅽ뙣: ' + err.message;
+        if (syncLog) syncLog.textContent = '다운로드 실패: ' + err.message;
     } finally {
         gDrivePullInProgress = false;
         if (pullSucceeded) gDriveInitialPullComplete = true;
