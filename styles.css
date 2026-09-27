@@ -28,6 +28,24 @@
     --glass-blur: blur(16px);
 }
 
+.quote-status {
+    display: block;
+    margin-top: 0.15rem;
+    font-size: 0.62rem;
+    line-height: 1.25;
+    color: var(--text-secondary);
+    white-space: normal;
+}
+
+.quote-status.stale,
+.quote-status.failed {
+    color: #f59e0b;
+}
+
+.quote-status.fresh {
+    color: #10b981;
+}
+
 [data-theme="light"] {
     /* Light Theme */
     --bg-color: #f1f5f9;
@@ -1043,8 +1061,9 @@ input:focus, select:focus, textarea:focus {
         grid-column: span 1;
     }
 }
-   
- /* Account Type Table Row Colors */
+ �
+�
+�/* Account Type Table Row Colors */
 [data-theme="dark"] .row-account-general { background-color: rgba(59, 130, 246, 0.05); }
 [data-theme="dark"] .row-account-isa { background-color: rgba(168, 85, 247, 0.05); }
 [data-theme="dark"] .row-account-pension { background-color: rgba(16, 185, 129, 0.05); }
