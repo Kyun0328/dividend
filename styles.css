@@ -1061,9 +1061,8 @@ input:focus, select:focus, textarea:focus {
         grid-column: span 1;
     }
 }
- �
-�
-�/* Account Type Table Row Colors */
+
+/* Account Type Table Row Colors */
 [data-theme="dark"] .row-account-general { background-color: rgba(59, 130, 246, 0.05); }
 [data-theme="dark"] .row-account-isa { background-color: rgba(168, 85, 247, 0.05); }
 [data-theme="dark"] .row-account-pension { background-color: rgba(16, 185, 129, 0.05); }
