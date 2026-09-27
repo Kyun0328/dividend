@@ -1,8 +1,9 @@
-const CACHE_NAME = 'dividend-tracker-v1';
+const CACHE_NAME = 'dividend-tracker-v2-stability';
 const ASSETS = [
   './',
   './index.html',
   './styles.css',
+  './data-core.js',
   './app.js',
   './manifest.json',
   './icon-192.png',
@@ -14,8 +15,12 @@ self.addEventListener('install', (e) => {
   e.waitUntil(
     caches.open(CACHE_NAME).then((cache) => {
       return cache.addAll(ASSETS);
-    }).then(() => self.skipWaiting())
+    })
   );
+});
+
+self.addEventListener('message', (event) => {
+  if (event.data?.type === 'SKIP_WAITING') self.skipWaiting();
 });
 
 // Activate Service Worker and clean up old caches
@@ -40,6 +45,11 @@ self.addEventListener('fetch', (e) => {
     return;
   }
   
+  if (e.request.mode === 'navigate') {
+    e.respondWith(fetch(e.request).catch(() => caches.match('./index.html')));
+    return;
+  }
+
   e.respondWith(
     caches.match(e.request).then((cachedResponse) => {
       if (cachedResponse) {
