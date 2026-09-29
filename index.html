@@ -28,7 +28,7 @@
     <div class="app-container">
         <!-- Mobile Header Bar -->
         <div class="mobile-header">
-            <button id="btnMobileMenu" class="btn-mobile-menu" title="메뉴 열기">
+            <button id="btnMobileMenu" class="btn-mobile-menu" title="메뉴 열기" onclick="document.querySelector('aside')?.classList.add('open'); document.getElementById('sidebarBackdrop')?.classList.add('active');">
                 <span class="mobile-menu-glyph" aria-hidden="true">☰</span>
                 <span class="sr-only">메뉴 열기</span>
             </button>
