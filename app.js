@@ -1,5 +1,5 @@
 // State Management
-const APP_VERSION = '2.0.0-stability';
+const APP_VERSION = '2.0.1-sync-conflict';
 const core = window.DividendCore;
 if (!core) throw new Error('data-core.js must be loaded before app.js');
 
@@ -4443,6 +4443,8 @@ let gDrivePushChain = Promise.resolve();
 let gDrivePushQueued = false;
 let gDriveRemoteModifiedTime = null;
 let gDriveBaselineFingerprint = null;
+let gDrivePendingConflict = null;
+const GDRIVE_PENDING_CONFLICT_KEY = 'dividend_sync_pending_conflict';
 
 function fingerprintLedger(value) {
     const comparable = {};
@@ -4458,17 +4460,152 @@ function fingerprintLedger(value) {
     return (hash >>> 0).toString(16);
 }
 
+function describeLedger(ledger) {
+    return `계좌 ${(ledger?.accounts || []).length}개 · 종목 ${(ledger?.portfolio || []).length}개 · 배당 ${(ledger?.dividendLogs || []).length}건`;
+}
+
+function updateSyncConflictUI() {
+    const panel = document.getElementById('gDriveConflictPanel');
+    const summary = document.getElementById('gDriveConflictSummary');
+    if (panel) panel.hidden = !gDrivePendingConflict;
+    if (!summary) return;
+    if (!gDrivePendingConflict) {
+        summary.textContent = '';
+        return;
+    }
+    summary.textContent = `${gDrivePendingConflict.reason}\n이 기기: ${describeLedger(gDrivePendingConflict.localLedger)}\nDrive: ${describeLedger(gDrivePendingConflict.remoteLedger)}`;
+    summary.style.whiteSpace = 'pre-line';
+}
+
+function loadPendingSyncConflict() {
+    try {
+        const raw = localStorage.getItem(GDRIVE_PENDING_CONFLICT_KEY);
+        gDrivePendingConflict = raw ? JSON.parse(raw) : null;
+        // Stability v2 originally saved timestamped copies but did not expose a
+        // recovery UI. Recover the newest unresolved pair after this update.
+        if (!gDrivePendingConflict && Number.isFinite(Number(localStorage.length)) && typeof localStorage.key === 'function') {
+            const prefix = 'dividend_sync_conflict_local_';
+            const resolvedStamp = localStorage.getItem('dividend_sync_conflict_resolved_stamp') || '';
+            const candidates = [];
+            for (let index = 0; index < localStorage.length; index++) {
+                const key = localStorage.key(index);
+                if (key?.startsWith(prefix)) candidates.push(key.slice(prefix.length));
+            }
+            candidates.sort().reverse();
+            const backupStamp = candidates.find(candidate => candidate > resolvedStamp &&
+                localStorage.getItem(`dividend_sync_conflict_remote_${candidate}`));
+            if (backupStamp) {
+                gDrivePendingConflict = {
+                    detectedAt: null,
+                    backupStamp,
+                    reason: '이전 버전에서 감지한 미해결 Drive 동기화 충돌',
+                    localLedger: JSON.parse(localStorage.getItem(`dividend_sync_conflict_local_${backupStamp}`)),
+                    remoteLedger: JSON.parse(localStorage.getItem(`dividend_sync_conflict_remote_${backupStamp}`)),
+                    remoteModifiedTime: null
+                };
+                localStorage.setItem(GDRIVE_PENDING_CONFLICT_KEY, JSON.stringify(gDrivePendingConflict));
+            }
+        }
+    } catch (error) {
+        console.warn('Saved Drive conflict could not be read:', error);
+        gDrivePendingConflict = null;
+    }
+    if (gDrivePendingConflict) gDriveInitialPullComplete = false;
+    updateSyncConflictUI();
+    return gDrivePendingConflict;
+}
+
+function clearPendingSyncConflict() {
+    const resolvedStamp = gDrivePendingConflict?.backupStamp;
+    gDrivePendingConflict = null;
+    try {
+        localStorage.removeItem(GDRIVE_PENDING_CONFLICT_KEY);
+        if (resolvedStamp) localStorage.setItem('dividend_sync_conflict_resolved_stamp', resolvedStamp);
+    } catch (_) {}
+    updateSyncConflictUI();
+}
+
 function preserveSyncConflict(localLedger, remoteLedger, reason) {
     const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-    localStorage.setItem(`dividend_sync_conflict_local_${stamp}`, JSON.stringify(localLedger));
-    localStorage.setItem(`dividend_sync_conflict_remote_${stamp}`, JSON.stringify(remoteLedger));
+    const conflict = {
+        detectedAt: new Date().toISOString(),
+        backupStamp: stamp,
+        reason,
+        localLedger: core.createCloudLedgerSnapshot(localLedger || {}),
+        remoteLedger: core.createCloudLedgerSnapshot(remoteLedger || {}),
+        remoteModifiedTime: gDriveRemoteModifiedTime
+    };
+    gDrivePendingConflict = conflict;
+    gDriveInitialPullComplete = false;
+    gDrivePushQueued = false;
+    let copiesSaved = true;
+    try {
+        // Save the actionable combined copy first. Timestamped copies are an
+        // additional archive and may fail independently when storage is tight.
+        localStorage.setItem(GDRIVE_PENDING_CONFLICT_KEY, JSON.stringify(conflict));
+    } catch (error) {
+        copiesSaved = false;
+        console.error('Drive pending conflict backup failed:', error);
+    }
+    try {
+        localStorage.setItem(`dividend_sync_conflict_local_${stamp}`, JSON.stringify(conflict.localLedger));
+        localStorage.setItem(`dividend_sync_conflict_remote_${stamp}`, JSON.stringify(conflict.remoteLedger));
+    } catch (error) {
+        console.warn('Drive timestamped conflict archive failed:', error);
+    }
+    updateSyncConflictUI();
+    const modal = document.getElementById('modalGDrive');
+    if (modal?.classList) modal.classList.add('open');
     const syncLog = document.getElementById('gDriveSyncLog');
-    if (syncLog) syncLog.textContent = `동기화 충돌 감지: ${reason}. 양쪽 사본을 이 브라우저에 보존했습니다.`;
-    showToast('Drive 동기화 충돌을 감지해 양쪽 사본을 보존했습니다.', 'warning');
+    if (syncLog) syncLog.textContent = `동기화 일시 중지: ${reason}. 아래에서 사용할 장부를 선택해 주세요.`;
+    showToast(copiesSaved
+        ? 'Drive 동기화를 멈췄습니다. 설정 화면에서 사용할 장부를 선택해 주세요.'
+        : 'Drive 동기화를 멈췄습니다. 사본 저장 공간이 부족할 수 있으니 설정 화면에서 장부를 선택해 주세요.', 'warning');
+    return conflict;
+}
+
+async function resolvePendingGDriveConflict(choice) {
+    const conflict = gDrivePendingConflict;
+    if (!conflict) return false;
+    const syncLog = document.getElementById('gDriveSyncLog');
+
+    if (choice === 'drive') {
+        state = core.mergeCloudLedger(state, conflict.remoteLedger);
+        if (!persistLocalState()) return false;
+        renderAll();
+        gDriveBaselineFingerprint = fingerprintLedger(conflict.remoteLedger);
+        gDriveRemoteModifiedTime = conflict.remoteModifiedTime || gDriveRemoteModifiedTime;
+        gDriveInitialPullComplete = Boolean(gDriveAccessToken);
+        clearPendingSyncConflict();
+        if (syncLog) syncLog.textContent = 'Drive 장부를 이 기기에 적용했습니다.';
+        showToast('Drive 장부를 적용했습니다. 충돌 사본은 백업으로 남아 있습니다.', 'success');
+        return true;
+    }
+
+    if (choice === 'local') {
+        if (!gDriveAccessToken) {
+            if (syncLog) syncLog.textContent = '이 기기 장부를 Drive에 저장하려면 먼저 구글에 다시 로그인해 주세요.';
+            showToast('구글 로그인 후 이 기기 장부 유지 버튼을 다시 눌러 주세요.', 'warning');
+            return false;
+        }
+        gDriveBaselineFingerprint = fingerprintLedger(conflict.remoteLedger);
+        gDriveRemoteModifiedTime = conflict.remoteModifiedTime || gDriveRemoteModifiedTime;
+        gDriveInitialPullComplete = true;
+        const uploaded = await pushStateToGDrive({ resolvingConflict: true });
+        if (!uploaded) {
+            gDriveInitialPullComplete = false;
+            return false;
+        }
+        clearPendingSyncConflict();
+        if (syncLog) syncLog.textContent = '이 기기 장부를 Drive에 저장했습니다.';
+        showToast('이 기기 장부를 Drive에 저장했습니다. 충돌 사본은 백업으로 남아 있습니다.', 'success');
+        return true;
+    }
+    return false;
 }
 
 function queueGDrivePush() {
-    if (storageWriteBlocked || !gDriveAccessToken || !gDriveInitialPullComplete || gDrivePullInProgress || gDrivePushQueued) return;
+    if (storageWriteBlocked || gDrivePendingConflict || !gDriveAccessToken || !gDriveInitialPullComplete || gDrivePullInProgress || gDrivePushQueued) return;
     gDrivePushQueued = true;
     gDrivePushChain = gDrivePushChain.catch(() => {}).then(async () => {
         gDrivePushQueued = false;
@@ -4485,10 +4622,14 @@ function setupGDriveSync() {
     const txtAccount = document.getElementById('gDriveAccountName');
     const btnPull = document.getElementById('btnGDrivePull');
     const btnPush = document.getElementById('btnGDrivePush');
+    const btnUseLocalLedger = document.getElementById('btnUseLocalLedger');
+    const btnUseDriveLedger = document.getElementById('btnUseDriveLedger');
     const syncLog = document.getElementById('gDriveSyncLog');
     const statusDot = document.getElementById('gDriveStatusDot');
 
     if (!inputClientId) return;
+
+    loadPendingSyncConflict();
 
     // Load saved settings
     const savedClientId = localStorage.getItem('gdrive_client_id') || '';
@@ -4648,8 +4789,35 @@ function setupGDriveSync() {
 
     // Manual PUSH
     btnPush.addEventListener('click', async () => {
+        if (gDrivePendingConflict) {
+            updateSyncConflictUI();
+            showToast('먼저 아래 동기화 충돌을 해결해 주세요.', 'warning');
+            return;
+        }
         queueGDrivePush();
         await gDrivePushChain;
+    });
+
+    btnUseLocalLedger?.addEventListener('click', async () => {
+        btnUseLocalLedger.disabled = true;
+        if (btnUseDriveLedger) btnUseDriveLedger.disabled = true;
+        try {
+            await resolvePendingGDriveConflict('local');
+        } finally {
+            btnUseLocalLedger.disabled = false;
+            if (btnUseDriveLedger) btnUseDriveLedger.disabled = false;
+        }
+    });
+
+    btnUseDriveLedger?.addEventListener('click', async () => {
+        btnUseDriveLedger.disabled = true;
+        if (btnUseLocalLedger) btnUseLocalLedger.disabled = true;
+        try {
+            await resolvePendingGDriveConflict('drive');
+        } finally {
+            btnUseDriveLedger.disabled = false;
+            if (btnUseLocalLedger) btnUseLocalLedger.disabled = false;
+        }
     });
 
     // Auto-initialize on load if client ID exists
@@ -4678,8 +4846,8 @@ function setupGDriveSync() {
 }
 
 // Push local state to Google Drive (Auto-save)
-async function pushStateToGDrive() {
-    if (storageWriteBlocked || !gDriveAccessToken || !gDriveInitialPullComplete || gDrivePullInProgress) return;
+async function pushStateToGDrive({ resolvingConflict = false } = {}) {
+    if (storageWriteBlocked || (!resolvingConflict && gDrivePendingConflict) || !gDriveAccessToken || !gDriveInitialPullComplete || gDrivePullInProgress) return false;
     const syncLog = document.getElementById('gDriveSyncLog');
     try {
         if (gDriveTokenExpiresAt && Date.now() >= gDriveTokenExpiresAt) throw new Error('인증 토큰 만료. 다시 로그인해 주세요.');
@@ -4704,7 +4872,7 @@ async function pushStateToGDrive() {
                     headers: { 'Authorization': 'Bearer ' + gDriveAccessToken }
                 }, 10000);
                 preserveSyncConflict(ledger, remoteRes.data, '다른 기기에서 파일이 변경됨');
-                return;
+                return false;
             }
         }
 
@@ -4735,12 +4903,14 @@ async function pushStateToGDrive() {
         gDriveRemoteModifiedTime = file.modifiedTime || gDriveRemoteModifiedTime;
         gDriveBaselineFingerprint = fingerprintLedger(ledger);
         if (syncLog) syncLog.textContent = `최근 장부 저장: ${new Date().toLocaleTimeString()}`;
+        return true;
     } catch (err) {
         if (/401|토큰 만료/.test(err.message)) {
             gDriveAccessToken = null;
             gDriveInitialPullComplete = false;
         }
         if (syncLog) syncLog.textContent = '저장 실패: ' + err.message;
+        return false;
     }
 }
 
@@ -4748,6 +4918,11 @@ async function pushStateToGDrive() {
 async function pullStateFromGDrive() {
     if (!gDriveAccessToken || storageWriteBlocked) return;
     const syncLog = document.getElementById('gDriveSyncLog');
+    if (gDrivePendingConflict || loadPendingSyncConflict()) {
+        if (syncLog) syncLog.textContent = '미해결 동기화 충돌이 있습니다. 아래에서 사용할 장부를 선택해 주세요.';
+        updateSyncConflictUI();
+        return false;
+    }
     gDrivePullInProgress = true;
     let pullSucceeded = false;
     try {
@@ -4784,6 +4959,7 @@ async function pullStateFromGDrive() {
             if (!gDriveBaselineFingerprint && localFingerprint !== remoteFingerprint &&
                 (localLedger.accounts.length || localLedger.portfolio.length || localLedger.dividendLogs.length)) {
                 preserveSyncConflict(localLedger, cloudState, '첫 동기화 전 로컬 장부와 원격 장부가 다름');
+                return;
             }
             state = core.mergeCloudLedger(state, cloudState);
             persistLocalState();
