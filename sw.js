@@ -1,4 +1,4 @@
-const CACHE_NAME = 'dividend-tracker-v2-1-1-navigation-repair';
+const CACHE_NAME = 'dividend-tracker-v2-1-2-quote-batch-repair';
 const ASSETS = [
   './',
   './index.html',
