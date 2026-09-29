@@ -1,5 +1,10 @@
 // State Management
-const APP_VERSION = '2.0.1-sync-conflict';
+const APP_VERSION = '2.1.0-batch-quotes';
+// Set this once after deploying the bundled Cloudflare Worker. Every device will
+// use it automatically; a per-device localStorage value still overrides it.
+const DEFAULT_PRICE_WORKER_URL = '';
+const PRICE_BATCH_TIMEOUT_MS = 14000;
+const PUBLIC_PRICE_GLOBAL_BUDGET_MS = 13000;
 const core = window.DividendCore;
 if (!core) throw new Error('data-core.js must be loaded before app.js');
 
@@ -184,6 +189,11 @@ function fetchWithTimeout(url, options = {}, timeoutMs = 8000) {
 async function fetchJsonWithTimeout(url, options = {}, timeoutMs = 8000) {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+    const externalSignal = options.signal;
+    if (externalSignal) {
+        if (externalSignal.aborted) controller.abort();
+        else externalSignal.addEventListener('abort', () => controller.abort(), { once: true });
+    }
     try {
         const response = await fetch(url, { ...options, signal: controller.signal });
         const data = await response.json();
@@ -266,7 +276,8 @@ async function getHistoricalExchangeRate(dateStr) {
 }
 
 function getConfiguredWorkerUrl() {
-    const value = (localStorage.getItem('price_worker_url') || '').trim().replace(/\/$/, '');
+    const override = (localStorage.getItem('price_worker_url') || '').trim();
+    const value = (override || DEFAULT_PRICE_WORKER_URL || '').trim().replace(/\/$/, '');
     if (!value) return '';
     try {
         const parsed = new URL(value);
@@ -275,6 +286,14 @@ function getConfiguredWorkerUrl() {
     } catch (_) {
         return '';
     }
+}
+
+function getYahooCandidateSymbols(ticker, currency) {
+    const normalized = String(ticker || '').trim().toUpperCase();
+    if (String(currency || '').toUpperCase() === 'KRW' && /^\d{6}$/.test(normalized)) {
+        return [`${normalized}.KS`, `${normalized}.KQ`];
+    }
+    return [normalized];
 }
 
 function parseYahooQuote(data, requestedCurrency, symbol, route) {
@@ -297,10 +316,10 @@ function parseYahooQuote(data, requestedCurrency, symbol, route) {
     };
 }
 
-async function fetchViaConfiguredWorker(symbol, currency) {
+async function fetchViaConfiguredWorker(symbol, currency, { signal } = {}) {
     const base = getConfiguredWorkerUrl();
     if (!base) return null;
-    const { response, data } = await fetchJsonWithTimeout(`${base}/price?symbol=${encodeURIComponent(symbol)}`, {}, 7000);
+    const { response, data } = await fetchJsonWithTimeout(`${base}/price?symbol=${encodeURIComponent(symbol)}`, { signal }, 7000);
     if (!response.ok) throw new Error(`Worker HTTP ${response.status}`);
     const price = Number(data?.price);
     if (!core.validatePriceQuote({ price, symbol: data?.symbol, currency: data?.currency }, symbol, currency)) {
@@ -313,7 +332,69 @@ async function fetchViaConfiguredWorker(symbol, currency) {
     };
 }
 
-async function fetchViaPublicProxies(targetUrl, symbol, currency) {
+async function fetchQuotesViaConfiguredWorker(entries) {
+    const base = getConfiguredWorkerUrl();
+    if (!base) return null;
+    const candidatesByKey = new Map();
+    const symbols = [];
+    const seen = new Set();
+    entries.forEach(([key, item]) => {
+        const candidates = getYahooCandidateSymbols(item.ticker, item.currency);
+        candidatesByKey.set(key, candidates);
+        candidates.forEach(symbol => {
+            if (!seen.has(symbol)) {
+                seen.add(symbol);
+                symbols.push(symbol);
+            }
+        });
+    });
+    if (symbols.length > 40) throw new Error('Worker 일괄 조회는 후보 종목 40개까지 지원합니다.');
+
+    const { response, data } = await fetchJsonWithTimeout(
+        `${base}/quotes?symbols=${encodeURIComponent(symbols.join(','))}`,
+        {},
+        PRICE_BATCH_TIMEOUT_MS
+    );
+    if (!response.ok) throw new Error(`시세 Worker HTTP ${response.status}`);
+    if (!Array.isArray(data?.results)) throw new Error('시세 Worker 일괄 응답 형식 오류');
+
+    const bySymbol = new Map(data.results.map(result => [String(result?.symbol || '').toUpperCase(), result]));
+    const mapped = new Map();
+    entries.forEach(([key, item]) => {
+        const candidates = candidatesByKey.get(key) || [];
+        const errors = [];
+        let selected = null;
+        for (const symbol of candidates) {
+            const result = bySymbol.get(symbol);
+            if (!result?.ok) {
+                errors.push(`${symbol}: ${result?.error || '응답 없음'}`);
+                continue;
+            }
+            const price = Number(result.price);
+            if (!core.validatePriceQuote({ price, symbol: result.symbol, currency: result.currency }, symbol, item.currency)) {
+                errors.push(`${symbol}: 응답 검증 실패`);
+                continue;
+            }
+            selected = {
+                price,
+                currency: item.currency,
+                upstreamCurrency: result.currency,
+                symbol,
+                provider: result.provider || '개인 시세 Worker',
+                route: result.cached ? 'configured-worker-cache' : 'configured-worker-batch',
+                quoteTimestamp: result.quoteTimestamp || null,
+                fetchedAt: result.fetchedAt || new Date().toISOString()
+            };
+            break;
+        }
+        mapped.set(key, selected
+            ? { status: 'fulfilled', value: selected }
+            : { status: 'rejected', reason: new Error(errors.join(' / ') || 'Worker 시세 없음') });
+    });
+    return { mapped, server: data.server || 'Cloudflare Worker', cachedCount: Number(data.cachedCount) || 0 };
+}
+
+async function fetchViaPublicProxies(targetUrl, symbol, currency, { signal } = {}) {
     let routes = [
         {
             name: 'corsproxy.io',
@@ -335,7 +416,7 @@ async function fetchViaPublicProxies(targetUrl, symbol, currency) {
     const preferredRoute = localStorage.getItem('price_proxy_route');
     if (preferredRoute) routes = routes.sort((a, b) => (a.name === preferredRoute ? -1 : b.name === preferredRoute ? 1 : 0));
     const attemptRoute = async (route, timeoutMs) => {
-        const { response, data: raw } = await fetchJsonWithTimeout(route.url, {}, timeoutMs);
+        const { response, data: raw } = await fetchJsonWithTimeout(route.url, { signal }, timeoutMs);
         if (!response.ok) throw new Error(`${route.name} HTTP ${response.status}`);
         const data = route.unwrap(raw);
         const quote = parseYahooQuote(data, currency, symbol, route.name);
@@ -344,12 +425,12 @@ async function fetchViaPublicProxies(targetUrl, symbol, currency) {
     };
     if (preferredRoute && routes[0]?.name === preferredRoute) {
         try {
-            return await attemptRoute(routes[0], 4500);
+            return await attemptRoute(routes[0], 3500);
         } catch (_) {
             routes = routes.slice(1);
         }
     }
-    const settled = await Promise.allSettled(routes.map(route => attemptRoute(route, 7000)));
+    const settled = await Promise.allSettled(routes.map(route => attemptRoute(route, 4000)));
     const success = settled.find(result => result.status === 'fulfilled');
     if (success) {
         localStorage.setItem('price_proxy_route', success.value.route);
@@ -359,12 +440,12 @@ async function fetchViaPublicProxies(targetUrl, symbol, currency) {
 }
 
 // Fetch a single stock's current price.
-async function fetchStockPrice(ticker, currency) {
+async function fetchStockPrice(ticker, currency, { signal } = {}) {
     // 1. Try local server first if running locally
     if (window.location.hostname === '127.0.0.1' || window.location.hostname === 'localhost' || window.location.protocol === 'file:') {
         try {
             const url = `http://127.0.0.1:5000/api/price?ticker=${encodeURIComponent(ticker)}&currency=${encodeURIComponent(currency)}`;
-            const { response, data } = await fetchJsonWithTimeout(url, {}, 4000);
+            const { response, data } = await fetchJsonWithTimeout(url, { signal }, 4000);
             if (response.ok) {
                 if (data.price && data.price > 0) {
                     return {
@@ -382,23 +463,14 @@ async function fetchStockPrice(ticker, currency) {
     
     // 2. Direct browser-only fetch using public CORS proxies
     // For Korean stocks (6-digit numeric ticker), convert to Yahoo Finance symbols (.KS or .KQ)
-    let candidateTickers = [ticker];
-    if (currency === 'KRW' && !ticker.includes('.')) {
-        candidateTickers = [`${ticker}.KS`, `${ticker}.KQ`];
-    }
+    const candidateTickers = getYahooCandidateSymbols(ticker, currency);
     
     // Try candidates (.KS first, then .KQ if .KS fails)
     const errors = [];
     for (const t of candidateTickers) {
         const targetUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(t)}?interval=1d&range=5d`;
         try {
-            const workerQuote = await fetchViaConfiguredWorker(t, currency);
-            if (workerQuote) return workerQuote;
-        } catch (error) {
-            errors.push(error.message);
-        }
-        try {
-            return await fetchViaPublicProxies(targetUrl, t, currency);
+            return await fetchViaPublicProxies(targetUrl, t, currency, { signal });
         } catch (error) {
             errors.push(error.message);
         }
@@ -417,7 +489,36 @@ async function refreshMarketData({ automatic = false } = {}) {
     }
 }
 
-// Fetch prices in small batches while retaining each last successful quote.
+async function fetchQuotesWithPublicBudget(entries, onProgress) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), PUBLIC_PRICE_GLOBAL_BUDGET_MS);
+    const mapped = new Map();
+    let cursor = 0;
+    let completed = 0;
+    const worker = async () => {
+        while (cursor < entries.length) {
+            const index = cursor++;
+            const [key, item] = entries[index];
+            try {
+                const value = await fetchStockPrice(item.ticker, item.currency, { signal: controller.signal });
+                mapped.set(key, { status: 'fulfilled', value });
+            } catch (reason) {
+                mapped.set(key, { status: 'rejected', reason });
+            }
+            completed++;
+            onProgress?.(completed, entries.length);
+        }
+    };
+    try {
+        await Promise.all(Array.from({ length: Math.min(6, entries.length) }, () => worker()));
+    } finally {
+        clearTimeout(timer);
+    }
+    return mapped;
+}
+
+// Fetch all quotes in one Worker request, or use a strictly time-budgeted fallback.
+// Every failure keeps the last known good quote for that portfolio key.
 async function fetchAllStockPrices({ automatic = false } = {}) {
     if (state.portfolio.length === 0) return { successCount: 0, failCount: 0 };
     const updateBtn = document.getElementById('btnUpdatePrices');
@@ -434,44 +535,60 @@ async function fetchAllStockPrices({ automatic = false } = {}) {
     let successCount = 0;
     let failCount = 0;
     const startedAt = new Date().toISOString();
+    const startedMs = Date.now();
     const entries = Array.from(tickerMap.entries());
-    let completed = 0;
+    const workerUrl = getConfiguredWorkerUrl();
+    let source = workerUrl ? '개인 Worker 일괄 조회' : '공개 프록시 (Worker 미설정)';
+    let serverStatus = workerUrl ? '연결 중' : `전체 ${Math.round(PUBLIC_PRICE_GLOBAL_BUDGET_MS / 1000)}초 제한`;
     try {
-        for (let offset = 0; offset < entries.length; offset += 2) {
-            const batch = entries.slice(offset, offset + 2);
-            const results = await Promise.allSettled(batch.map(([, item]) => fetchStockPrice(item.ticker, item.currency)));
-            results.forEach((result, index) => {
-                const [key, item] = batch[index];
-                completed++;
-                if (result.status === 'fulfilled' && result.value) {
-                    state.stockPrices[key] = { ...result.value, lastAttemptAt: startedAt, lastError: null };
-                    successCount++;
-                } else {
-                    state.stockPrices[key] = {
-                        ...(state.stockPrices[key] || {}),
-                        currency: item.currency,
-                        lastAttemptAt: startedAt,
-                        lastError: result.reason?.message || '조회 실패'
-                    };
-                    failCount++;
-                }
+        let mapped;
+        if (workerUrl) {
+            try {
+                const batch = await fetchQuotesViaConfiguredWorker(entries);
+                mapped = batch.mapped;
+                serverStatus = `정상${batch.cachedCount ? ` · 캐시 ${batch.cachedCount}개` : ''}`;
+            } catch (error) {
+                serverStatus = `연결 실패 · ${error?.name === 'AbortError' ? '시간 초과' : (error?.message || '조회 오류')}`;
+                mapped = new Map(entries.map(([key]) => [key, { status: 'rejected', reason: error }]));
+            }
+        } else {
+            mapped = await fetchQuotesWithPublicBudget(entries, (completed, total) => {
+                if (updateBtn) updateBtn.textContent = `조회 중 (${completed}/${total})...`;
             });
-            if (updateBtn) updateBtn.textContent = `조회 중 (${completed}/${entries.length})...`;
-            saveState({ sync: false });
         }
+
+        entries.forEach(([key, item]) => {
+            const result = mapped.get(key);
+            if (result?.status === 'fulfilled' && result.value) {
+                state.stockPrices[key] = { ...result.value, lastAttemptAt: startedAt, lastError: null };
+                successCount++;
+            } else {
+                state.stockPrices[key] = {
+                    ...(state.stockPrices[key] || {}),
+                    currency: item.currency,
+                    lastAttemptAt: startedAt,
+                    lastError: result?.reason?.message || '조회 실패'
+                };
+                failCount++;
+            }
+        });
         const finishedAt = new Date().toISOString();
         state.priceUpdateStatus = {
             lastAttemptAt: finishedAt,
             lastSuccessAt: successCount > 0 ? finishedAt : (state.priceUpdateStatus?.lastSuccessAt || state.lastPriceUpdate || null),
             successCount,
-            failCount
+            failCount,
+            source,
+            serverStatus,
+            durationMs: Date.now() - startedMs
         };
         if (successCount > 0) state.lastPriceUpdate = finishedAt;
         saveState({ sync: false });
         if (!automatic) {
-            if (failCount > 0 && successCount > 0) showToast(`${successCount}개 성공, ${failCount}개 실패. 마지막 정상 가격은 보존했습니다.`, 'warning');
-            else if (failCount > 0) showToast('모든 현재가 조회에 실패했습니다. 마지막 정상 가격은 보존했습니다.', 'danger');
-            else showToast(`${successCount}개 종목 현재가가 업데이트되었습니다.`, 'success');
+            const seconds = Math.max(0.1, (state.priceUpdateStatus.durationMs / 1000)).toFixed(1);
+            if (failCount > 0 && successCount > 0) showToast(`${successCount}개 성공, ${failCount}개 실패 (${seconds}초). 마지막 정상 가격은 보존했습니다.`, 'warning');
+            else if (failCount > 0) showToast(`모든 현재가 조회에 실패했습니다 (${seconds}초). 마지막 정상 가격은 보존했습니다.`, 'danger');
+            else showToast(`${successCount}개 종목 현재가가 ${seconds}초 만에 업데이트되었습니다.`, 'success');
         }
         return { successCount, failCount };
     } finally {
@@ -537,12 +654,15 @@ function updatePriceTimestamp() {
         });
         
         const counts = Number.isFinite(priceStatus.successCount) ? ` · 시세 ${priceStatus.successCount}성공/${priceStatus.failCount || 0}실패` : '';
+        const source = priceStatus.source ? ` · ${priceStatus.source}` : '';
+        const duration = Number.isFinite(priceStatus.durationMs) ? ` ${(priceStatus.durationMs / 1000).toFixed(1)}초` : '';
+        const serverStatus = priceStatus.serverStatus ? ` (${priceStatus.serverStatus}${duration})` : '';
         const fxMeta = state.currentExchangeRateMeta || {};
         const rateStr = state.currentExchangeRate
             ? ` · 환율 ₩${state.currentExchangeRate.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}${fxMeta.asOf ? ` (기준 ${new Date(fxMeta.asOf).toLocaleDateString('ko-KR')})` : ''}`
             : ' · 환율 미조회';
         const fxError = fxMeta.status === 'error' ? ' · 환율 최근 조회 실패(마지막 정상값 유지)' : '';
-        el.textContent = `마지막 시도: ${timeStr}${counts}${rateStr}${fxError}`;
+        el.textContent = `마지막 시도: ${timeStr}${counts}${source}${serverStatus}${rateStr}${fxError}`;
     } else {
         el.textContent = '';
     }
@@ -4616,6 +4736,7 @@ function queueGDrivePush() {
 function setupGDriveSync() {
     const inputClientId = document.getElementById('gDriveClientId');
     const inputWorkerUrl = document.getElementById('priceWorkerUrl');
+    const priceWorkerStatus = document.getElementById('priceWorkerStatus');
     const btnSave = document.getElementById('btnSaveGDriveConfig');
     const btnLogin = document.getElementById('btnGDriveLogin');
     const btnLogout = document.getElementById('btnGDriveLogout');
@@ -4634,7 +4755,21 @@ function setupGDriveSync() {
     // Load saved settings
     const savedClientId = localStorage.getItem('gdrive_client_id') || '';
     inputClientId.value = savedClientId;
-    if (inputWorkerUrl) inputWorkerUrl.value = localStorage.getItem('price_worker_url') || '';
+    if (inputWorkerUrl) {
+        const override = localStorage.getItem('price_worker_url') || '';
+        inputWorkerUrl.value = override;
+        if (!override && DEFAULT_PRICE_WORKER_URL) inputWorkerUrl.placeholder = DEFAULT_PRICE_WORKER_URL;
+    }
+    const refreshPriceWorkerStatus = () => {
+        if (!priceWorkerStatus) return;
+        const override = (localStorage.getItem('price_worker_url') || '').trim();
+        const configured = getConfiguredWorkerUrl();
+        priceWorkerStatus.textContent = configured
+            ? `사용 중: ${override ? '이 기기에 저장한 Worker' : '앱 기본 Worker'} · 일괄 조회/5분 캐시`
+            : 'Worker 미설정 · 공개 프록시는 느리거나 차단될 수 있습니다.';
+        priceWorkerStatus.style.color = configured ? 'var(--success)' : '#f59e0b';
+    };
+    refreshPriceWorkerStatus();
 
     const updateUI = (isLoggedIn, accountText = '연동되어 있지 않음') => {
         if (isLoggedIn) {
@@ -4735,6 +4870,7 @@ function setupGDriveSync() {
         } else {
             localStorage.removeItem('price_worker_url');
         }
+        refreshPriceWorkerStatus();
         if (!clientId) {
             localStorage.removeItem('gdrive_client_id');
             showToast('앱 설정이 저장되었습니다.', 'success');
@@ -4815,170 +4951,4 @@ function setupGDriveSync() {
         try {
             await resolvePendingGDriveConflict('drive');
         } finally {
-            btnUseDriveLedger.disabled = false;
-            if (btnUseLocalLedger) btnUseLocalLedger.disabled = false;
-        }
-    });
-
-    // Auto-initialize on load if client ID exists
-    if (savedClientId) {
-        // Load GAPI client libraries
-        const loadGapi = () => {
-            if (typeof gapi !== 'undefined') {
-                gapi.load('client', () => {});
-            } else {
-                setTimeout(loadGapi, 500);
-            }
-        };
-        loadGapi();
-
-        // Silent login or token refresh if user was logged in
-        window.addEventListener('load', () => {
-            setTimeout(() => {
-                initTokenClient(savedClientId);
-                if (localStorage.getItem('gdrive_logged_in') === 'true' && gDriveTokenClient) {
-                    updateLog('자동 연동 재연결 중...');
-                    gDriveTokenClient.requestAccessToken({ prompt: '' }); // Silent token request
-                }
-            }, 1000);
-        });
-    }
-}
-
-// Push local state to Google Drive (Auto-save)
-async function pushStateToGDrive({ resolvingConflict = false } = {}) {
-    if (storageWriteBlocked || (!resolvingConflict && gDrivePendingConflict) || !gDriveAccessToken || !gDriveInitialPullComplete || gDrivePullInProgress) return false;
-    const syncLog = document.getElementById('gDriveSyncLog');
-    try {
-        if (gDriveTokenExpiresAt && Date.now() >= gDriveTokenExpiresAt) throw new Error('인증 토큰 만료. 다시 로그인해 주세요.');
-        if (syncLog) syncLog.textContent = '클라우드에 장부 저장 중...';
-        const ledger = core.createCloudLedgerSnapshot(state);
-
-        if (!gDriveFileId) {
-            const response = await gapi.client.drive.files.list({
-                spaces: 'appDataFolder', q: "name = 'portfolio_state.json'",
-                fields: 'files(id, name, modifiedTime)', pageSize: 1
-            });
-            const remote = response.result.files?.[0];
-            if (remote) {
-                gDriveFileId = remote.id;
-                gDriveRemoteModifiedTime = remote.modifiedTime || null;
-            }
-        } else if (gDriveRemoteModifiedTime) {
-            const current = await gapi.client.drive.files.get({ fileId: gDriveFileId, fields: 'id, modifiedTime' });
-            const currentModified = current.result?.modifiedTime || null;
-            if (currentModified && currentModified !== gDriveRemoteModifiedTime) {
-                const remoteRes = await fetchJsonWithTimeout(`https://www.googleapis.com/drive/v3/files/${gDriveFileId}?alt=media`, {
-                    headers: { 'Authorization': 'Bearer ' + gDriveAccessToken }
-                }, 10000);
-                preserveSyncConflict(ledger, remoteRes.data, '다른 기기에서 파일이 변경됨');
-                return false;
-            }
-        }
-
-        const boundary = 'dividend_dashboard_boundary';
-        const delimiter = `\r\n--${boundary}\r\n`;
-        const closeDelimiter = `\r\n--${boundary}--`;
-        const metadata = { name: 'portfolio_state.json', mimeType: 'application/json' };
-        let url = 'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,modifiedTime';
-        let method = 'POST';
-        if (gDriveFileId) {
-            url = `https://www.googleapis.com/upload/drive/v3/files/${gDriveFileId}?uploadType=multipart&fields=id,modifiedTime`;
-            method = 'PATCH';
-        } else {
-            metadata.parents = ['appDataFolder'];
-        }
-        const body = delimiter + 'Content-Type: application/json\r\n\r\n' + JSON.stringify(metadata) +
-            delimiter + 'Content-Type: application/json\r\n\r\n' + JSON.stringify(ledger, null, 2) + closeDelimiter;
-        const { response, data: file } = await fetchJsonWithTimeout(url, {
-            method,
-            headers: {
-                'Authorization': 'Bearer ' + gDriveAccessToken,
-                'Content-Type': `multipart/related; boundary=${boundary}`
-            },
-            body
-        }, 15000);
-        if (!response.ok) throw new Error(`클라우드 업로드 실패 (${response.status})`);
-        gDriveFileId = file.id || gDriveFileId;
-        gDriveRemoteModifiedTime = file.modifiedTime || gDriveRemoteModifiedTime;
-        gDriveBaselineFingerprint = fingerprintLedger(ledger);
-        if (syncLog) syncLog.textContent = `최근 장부 저장: ${new Date().toLocaleTimeString()}`;
-        return true;
-    } catch (err) {
-        if (/401|토큰 만료/.test(err.message)) {
-            gDriveAccessToken = null;
-            gDriveInitialPullComplete = false;
-        }
-        if (syncLog) syncLog.textContent = '저장 실패: ' + err.message;
-        return false;
-    }
-}
-
-// Pull cloud state from Google Drive and merge
-async function pullStateFromGDrive() {
-    if (!gDriveAccessToken || storageWriteBlocked) return;
-    const syncLog = document.getElementById('gDriveSyncLog');
-    if (gDrivePendingConflict || loadPendingSyncConflict()) {
-        if (syncLog) syncLog.textContent = '미해결 동기화 충돌이 있습니다. 아래에서 사용할 장부를 선택해 주세요.';
-        updateSyncConflictUI();
-        return false;
-    }
-    gDrivePullInProgress = true;
-    let pullSucceeded = false;
-    try {
-        if (syncLog) syncLog.textContent = '클라우드 데이터 조회 중...';
-        const response = await gapi.client.drive.files.list({
-            spaces: 'appDataFolder',
-            q: "name = 'portfolio_state.json'",
-            fields: 'files(id, name, modifiedTime)',
-            pageSize: 1
-        });
-        const files = response.result.files;
-        if (!files || files.length === 0) {
-            if (syncLog) syncLog.textContent = '클라우드 데이터 없음. 로컬 데이터로 파일 생성 중...';
-            gDriveInitialPullComplete = true;
-            gDrivePullInProgress = false;
-            await pushStateToGDrive();
-            pullSucceeded = true;
-            return;
-        }
-        gDriveFileId = files[0].id;
-        gDriveRemoteModifiedTime = files[0].modifiedTime || null;
-        const { response: fileRes, data: cloudState } = await fetchJsonWithTimeout(`https://www.googleapis.com/drive/v3/files/${gDriveFileId}?alt=media`, {
-            headers: { 'Authorization': 'Bearer ' + gDriveAccessToken }
-        }, 10000);
-        if (!fileRes.ok) throw new Error(`파일 다운로드 에러 (${fileRes.status})`);
-        if (cloudState && (cloudState.portfolio || cloudState.dividendLogs)) {
-            const localLedger = core.createCloudLedgerSnapshot(state);
-            const remoteFingerprint = fingerprintLedger(cloudState);
-            const localFingerprint = fingerprintLedger(localLedger);
-            if (localFingerprint !== remoteFingerprint && gDriveBaselineFingerprint && localFingerprint !== gDriveBaselineFingerprint) {
-                preserveSyncConflict(localLedger, cloudState, '로컬과 원격 장부가 모두 변경됨');
-                return;
-            }
-            if (!gDriveBaselineFingerprint && localFingerprint !== remoteFingerprint &&
-                (localLedger.accounts.length || localLedger.portfolio.length || localLedger.dividendLogs.length)) {
-                preserveSyncConflict(localLedger, cloudState, '첫 동기화 전 로컬 장부와 원격 장부가 다름');
-                return;
-            }
-            state = core.mergeCloudLedger(state, cloudState);
-            persistLocalState();
-            renderAll();
-            gDriveBaselineFingerprint = remoteFingerprint;
-            const timeStr = new Date().toLocaleTimeString();
-            if (syncLog) syncLog.textContent = `최근 장부 불러오기: ${timeStr}`;
-            showToast('구글 드라이브 장부를 동기화했습니다. 이 기기의 시세 캐시는 유지했습니다.', 'success');
-        }
-        pullSucceeded = true;
-    } catch (err) {
-        if (syncLog) syncLog.textContent = '다운로드 실패: ' + err.message;
-    } finally {
-        gDrivePullInProgress = false;
-        if (pullSucceeded) gDriveInitialPullComplete = true;
-    }
-}
-
-// Trigger initialization on DOMContentLoaded
-document.addEventListener('DOMContentLoaded', () => {
-    setupGDriveSync();
-});
+            btnUseDriveLe[Truncated]
