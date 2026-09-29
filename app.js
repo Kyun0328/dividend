@@ -350,15 +350,32 @@ async function fetchQuotesViaConfiguredWorker(entries) {
     });
     if (symbols.length > 40) throw new Error('Worker 일괄 조회는 후보 종목 40개까지 지원합니다.');
 
-    const { response, data } = await fetchJsonWithTimeout(
-        `${base}/quotes?symbols=${encodeURIComponent(symbols.join(','))}`,
-        {},
-        PRICE_BATCH_TIMEOUT_MS
-    );
-    if (!response.ok) throw new Error(`시세 Worker HTTP ${response.status}`);
-    if (!Array.isArray(data?.results)) throw new Error('시세 Worker 일괄 응답 형식 오류');
-
-    const bySymbol = new Map(data.results.map(result => [String(result?.symbol || '').toUpperCase(), result]));
+    // Cloudflare's free Worker counts cache reads and upstream requests as
+    // subrequests. Korean tickers may create both .KS and .KQ candidates, so
+    // one large request can exceed that limit and lose every quote. Keep each
+    // request below the limit; chunks run together so the user still waits for
+    // only the slowest group.
+    const chunks = [];
+    for (let index = 0; index < symbols.length; index += 12) chunks.push(symbols.slice(index, index + 12));
+    const chunkResponses = await Promise.allSettled(chunks.map(async (chunk) => {
+        const { response, data } = await fetchJsonWithTimeout(
+            `${base}/quotes?symbols=${encodeURIComponent(chunk.join(','))}`,
+            {},
+            PRICE_BATCH_TIMEOUT_MS
+        );
+        if (!response.ok) throw new Error(`시세 Worker HTTP ${response.status}`);
+        if (!Array.isArray(data?.results)) throw new Error('시세 Worker 일괄 응답 형식 오류');
+        return data;
+    }));
+    const responses = chunkResponses
+        .filter(result => result.status === 'fulfilled')
+        .map(result => result.value);
+    if (responses.length === 0) {
+        const failed = chunkResponses.find(result => result.status === 'rejected');
+        throw failed?.reason || new Error('시세 Worker 일괄 조회 실패');
+    }
+    const bySymbol = new Map(responses.flatMap(data => data.results)
+        .map(result => [String(result?.symbol || '').toUpperCase(), result]));
     const mapped = new Map();
     entries.forEach(([key, item]) => {
         const candidates = candidatesByKey.get(key) || [];
@@ -391,7 +408,11 @@ async function fetchQuotesViaConfiguredWorker(entries) {
             ? { status: 'fulfilled', value: selected }
             : { status: 'rejected', reason: new Error(errors.join(' / ') || 'Worker 시세 없음') });
     });
-    return { mapped, server: data.server || 'Cloudflare Worker', cachedCount: Number(data.cachedCount) || 0 };
+    return {
+        mapped,
+        server: responses[0]?.server || 'Cloudflare Worker',
+        cachedCount: responses.reduce((total, data) => total + (Number(data.cachedCount) || 0), 0)
+    };
 }
 
 async function fetchViaPublicProxies(targetUrl, symbol, currency, { signal } = {}) {
