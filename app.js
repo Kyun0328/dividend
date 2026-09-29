@@ -1,5 +1,5 @@
 // State Management
-const APP_VERSION = '2.1.1-navigation-repair';
+const APP_VERSION = '2.1.2-quote-batch-repair';
 // Set this once after deploying the bundled Cloudflare Worker. Every device will
 // use it automatically; a per-device localStorage value still overrides it.
 const DEFAULT_PRICE_WORKER_URL = 'https://dividend-quotes.casio82.workers.dev';
@@ -290,7 +290,7 @@ function getConfiguredWorkerUrl() {
 
 function getYahooCandidateSymbols(ticker, currency) {
     const normalized = String(ticker || '').trim().toUpperCase();
-    if (String(currency || '').toUpperCase() === 'KRW' && /^\d{6}$/.test(normalized)) {
+    if (String(currency || '').toUpperCase() === 'KRW' && /^[0-9A-Z]{6}$/.test(normalized)) {
         return [`${normalized}.KS`, `${normalized}.KQ`];
     }
     return [normalized];
