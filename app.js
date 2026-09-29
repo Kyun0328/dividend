@@ -1,8 +1,8 @@
 // State Management
-const APP_VERSION = '2.1.0-batch-quotes';
+const APP_VERSION = '2.1.1-navigation-repair';
 // Set this once after deploying the bundled Cloudflare Worker. Every device will
 // use it automatically; a per-device localStorage value still overrides it.
-const DEFAULT_PRICE_WORKER_URL = 'https://dividend-quotes.casio82.workers.dev';
+const DEFAULT_PRICE_WORKER_URL = '';
 const PRICE_BATCH_TIMEOUT_MS = 14000;
 const PUBLIC_PRICE_GLOBAL_BUDGET_MS = 13000;
 const core = window.DividendCore;
@@ -4540,7 +4540,7 @@ if ('serviceWorker' in navigator) {
         window.location.reload();
     });
     window.addEventListener('load', () => {
-        navigator.serviceWorker.register('./sw.js').then(registration => {
+        navigator.serviceWorker.register('./sw.js', { updateViaCache: 'none' }).then(registration => {
             if (registration.waiting) showServiceWorkerUpdate(registration.waiting);
             registration.addEventListener('updatefound', () => {
                 const worker = registration.installing;
@@ -4950,4 +4950,171 @@ function setupGDriveSync() {
         if (btnUseLocalLedger) btnUseLocalLedger.disabled = true;
         try {
             await resolvePendingGDriveConflict('drive');
-  [Truncated]
+        } finally {
+            btnUseDriveLedger.disabled = false;
+            if (btnUseLocalLedger) btnUseLocalLedger.disabled = false;
+        }
+    });
+
+    // Auto-initialize on load if client ID exists
+    if (savedClientId) {
+        // Load GAPI client libraries
+        const loadGapi = () => {
+            if (typeof gapi !== 'undefined') {
+                gapi.load('client', () => {});
+            } else {
+                setTimeout(loadGapi, 500);
+            }
+        };
+        loadGapi();
+
+        // Silent login or token refresh if user was logged in
+        window.addEventListener('load', () => {
+            setTimeout(() => {
+                initTokenClient(savedClientId);
+                if (localStorage.getItem('gdrive_logged_in') === 'true' && gDriveTokenClient) {
+                    updateLog('자동 연동 재연결 중...');
+                    gDriveTokenClient.requestAccessToken({ prompt: '' }); // Silent token request
+                }
+            }, 1000);
+        });
+    }
+}
+
+// Push local state to Google Drive (Auto-save)
+async function pushStateToGDrive({ resolvingConflict = false } = {}) {
+    if (storageWriteBlocked || (!resolvingConflict && gDrivePendingConflict) || !gDriveAccessToken || !gDriveInitialPullComplete || gDrivePullInProgress) return false;
+    const syncLog = document.getElementById('gDriveSyncLog');
+    try {
+        if (gDriveTokenExpiresAt && Date.now() >= gDriveTokenExpiresAt) throw new Error('인증 토큰 만료. 다시 로그인해 주세요.');
+        if (syncLog) syncLog.textContent = '클라우드에 장부 저장 중...';
+        const ledger = core.createCloudLedgerSnapshot(state);
+
+        if (!gDriveFileId) {
+            const response = await gapi.client.drive.files.list({
+                spaces: 'appDataFolder', q: "name = 'portfolio_state.json'",
+                fields: 'files(id, name, modifiedTime)', pageSize: 1
+            });
+            const remote = response.result.files?.[0];
+            if (remote) {
+                gDriveFileId = remote.id;
+                gDriveRemoteModifiedTime = remote.modifiedTime || null;
+            }
+        } else if (gDriveRemoteModifiedTime) {
+            const current = await gapi.client.drive.files.get({ fileId: gDriveFileId, fields: 'id, modifiedTime' });
+            const currentModified = current.result?.modifiedTime || null;
+            if (currentModified && currentModified !== gDriveRemoteModifiedTime) {
+                const remoteRes = await fetchJsonWithTimeout(`https://www.googleapis.com/drive/v3/files/${gDriveFileId}?alt=media`, {
+                    headers: { 'Authorization': 'Bearer ' + gDriveAccessToken }
+                }, 10000);
+                preserveSyncConflict(ledger, remoteRes.data, '다른 기기에서 파일이 변경됨');
+                return false;
+            }
+        }
+
+        const boundary = 'dividend_dashboard_boundary';
+        const delimiter = `\r\n--${boundary}\r\n`;
+        const closeDelimiter = `\r\n--${boundary}--`;
+        const metadata = { name: 'portfolio_state.json', mimeType: 'application/json' };
+        let url = 'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,modifiedTime';
+        let method = 'POST';
+        if (gDriveFileId) {
+            url = `https://www.googleapis.com/upload/drive/v3/files/${gDriveFileId}?uploadType=multipart&fields=id,modifiedTime`;
+            method = 'PATCH';
+        } else {
+            metadata.parents = ['appDataFolder'];
+        }
+        const body = delimiter + 'Content-Type: application/json\r\n\r\n' + JSON.stringify(metadata) +
+            delimiter + 'Content-Type: application/json\r\n\r\n' + JSON.stringify(ledger, null, 2) + closeDelimiter;
+        const { response, data: file } = await fetchJsonWithTimeout(url, {
+            method,
+            headers: {
+                'Authorization': 'Bearer ' + gDriveAccessToken,
+                'Content-Type': `multipart/related; boundary=${boundary}`
+            },
+            body
+        }, 15000);
+        if (!response.ok) throw new Error(`클라우드 업로드 실패 (${response.status})`);
+        gDriveFileId = file.id || gDriveFileId;
+        gDriveRemoteModifiedTime = file.modifiedTime || gDriveRemoteModifiedTime;
+        gDriveBaselineFingerprint = fingerprintLedger(ledger);
+        if (syncLog) syncLog.textContent = `최근 장부 저장: ${new Date().toLocaleTimeString()}`;
+        return true;
+    } catch (err) {
+        if (/401|토큰 만료/.test(err.message)) {
+            gDriveAccessToken = null;
+            gDriveInitialPullComplete = false;
+        }
+        if (syncLog) syncLog.textContent = '저장 실패: ' + err.message;
+        return false;
+    }
+}
+
+// Pull cloud state from Google Drive and merge
+async function pullStateFromGDrive() {
+    if (!gDriveAccessToken || storageWriteBlocked) return;
+    const syncLog = document.getElementById('gDriveSyncLog');
+    if (gDrivePendingConflict || loadPendingSyncConflict()) {
+        if (syncLog) syncLog.textContent = '미해결 동기화 충돌이 있습니다. 아래에서 사용할 장부를 선택해 주세요.';
+        updateSyncConflictUI();
+        return false;
+    }
+    gDrivePullInProgress = true;
+    let pullSucceeded = false;
+    try {
+        if (syncLog) syncLog.textContent = '클라우드 데이터 조회 중...';
+        const response = await gapi.client.drive.files.list({
+            spaces: 'appDataFolder',
+            q: "name = 'portfolio_state.json'",
+            fields: 'files(id, name, modifiedTime)',
+            pageSize: 1
+        });
+        const files = response.result.files;
+        if (!files || files.length === 0) {
+            if (syncLog) syncLog.textContent = '클라우드 데이터 없음. 로컬 데이터로 파일 생성 중...';
+            gDriveInitialPullComplete = true;
+            gDrivePullInProgress = false;
+            await pushStateToGDrive();
+            pullSucceeded = true;
+            return;
+        }
+        gDriveFileId = files[0].id;
+        gDriveRemoteModifiedTime = files[0].modifiedTime || null;
+        const { response: fileRes, data: cloudState } = await fetchJsonWithTimeout(`https://www.googleapis.com/drive/v3/files/${gDriveFileId}?alt=media`, {
+            headers: { 'Authorization': 'Bearer ' + gDriveAccessToken }
+        }, 10000);
+        if (!fileRes.ok) throw new Error(`파일 다운로드 에러 (${fileRes.status})`);
+        if (cloudState && (cloudState.portfolio || cloudState.dividendLogs)) {
+            const localLedger = core.createCloudLedgerSnapshot(state);
+            const remoteFingerprint = fingerprintLedger(cloudState);
+            const localFingerprint = fingerprintLedger(localLedger);
+            if (localFingerprint !== remoteFingerprint && gDriveBaselineFingerprint && localFingerprint !== gDriveBaselineFingerprint) {
+                preserveSyncConflict(localLedger, cloudState, '로컬과 원격 장부가 모두 변경됨');
+                return;
+            }
+            if (!gDriveBaselineFingerprint && localFingerprint !== remoteFingerprint &&
+                (localLedger.accounts.length || localLedger.portfolio.length || localLedger.dividendLogs.length)) {
+                preserveSyncConflict(localLedger, cloudState, '첫 동기화 전 로컬 장부와 원격 장부가 다름');
+                return;
+            }
+            state = core.mergeCloudLedger(state, cloudState);
+            persistLocalState();
+            renderAll();
+            gDriveBaselineFingerprint = remoteFingerprint;
+            const timeStr = new Date().toLocaleTimeString();
+            if (syncLog) syncLog.textContent = `최근 장부 불러오기: ${timeStr}`;
+            showToast('구글 드라이브 장부를 동기화했습니다. 이 기기의 시세 캐시는 유지했습니다.', 'success');
+        }
+        pullSucceeded = true;
+    } catch (err) {
+        if (syncLog) syncLog.textContent = '다운로드 실패: ' + err.message;
+    } finally {
+        gDrivePullInProgress = false;
+        if (pullSucceeded) gDriveInitialPullComplete = true;
+    }
+}
+
+// Trigger initialization on DOMContentLoaded
+document.addEventListener('DOMContentLoaded', () => {
+    setupGDriveSync();
+});
