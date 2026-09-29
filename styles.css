@@ -997,6 +997,31 @@ input:focus, select:focus, textarea:focus {
     transition: background 0.2s;
 }
 
+/* Keep the primary navigation control visible even when the optional icon CDN is unavailable. */
+.mobile-menu-glyph {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 20px;
+    height: 20px;
+    color: var(--text-primary);
+    font-size: 1.35rem;
+    line-height: 1;
+    font-family: Arial, sans-serif;
+}
+
+.sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+}
+
 .btn-mobile-menu:hover {
     background: var(--border-color);
 }
