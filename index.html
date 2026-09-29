@@ -1089,6 +1089,22 @@
                 <div id="gDriveSyncLog" style="font-size: 0.72rem; color: var(--text-muted); margin-top: 0.75rem; text-align: center;">
                     * 연동을 시작하려면 먼저 Client ID를 입력하고 저장해 주세요.
                 </div>
+
+                <div id="gDriveConflictPanel" hidden style="margin-top: 1rem; padding: 0.85rem; border: 1px solid #f59e0b; border-radius: 8px; background: rgba(245, 158, 11, 0.08);">
+                    <div style="font-weight: 700; color: #f59e0b; margin-bottom: 0.4rem;">동기화 충돌 해결 필요</div>
+                    <div id="gDriveConflictSummary" style="font-size: 0.75rem; color: var(--text-secondary); margin-bottom: 0.75rem; line-height: 1.55;"></div>
+                    <div style="display: flex; gap: 0.5rem; flex-direction: column;">
+                        <button id="btnUseLocalLedger" type="button" class="btn btn-secondary" style="font-size: 0.78rem; height: auto; padding: 0.55rem 0.75rem;">
+                            이 기기 장부 유지 · Drive에 덮어쓰기
+                        </button>
+                        <button id="btnUseDriveLedger" type="button" class="btn btn-secondary" style="font-size: 0.78rem; height: auto; padding: 0.55rem 0.75rem;">
+                            Drive 장부 사용 · 이 기기 장부 교체
+                        </button>
+                    </div>
+                    <div style="font-size: 0.68rem; color: var(--text-muted); margin-top: 0.65rem; line-height: 1.45;">
+                        선택 전에는 어느 쪽도 덮어쓰지 않습니다. 양쪽 사본은 이 브라우저에 별도로 보관됩니다.
+                    </div>
+                </div>
             </div>
             <div class="action-btns" style="margin-top: 1.5rem; justify-content: flex-end;">
                 <button type="button" class="btn btn-primary" id="btnSaveGDriveConfig">설정 완료</button>
