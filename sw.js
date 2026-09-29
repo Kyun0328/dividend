@@ -1,4 +1,4 @@
-const CACHE_NAME = 'dividend-tracker-v2-stability';
+const CACHE_NAME = 'dividend-tracker-v2-sync-conflict';
 const ASSETS = [
   './',
   './index.html',
