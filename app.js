@@ -2,7 +2,7 @@
 const APP_VERSION = '2.1.1-navigation-repair';
 // Set this once after deploying the bundled Cloudflare Worker. Every device will
 // use it automatically; a per-device localStorage value still overrides it.
-const DEFAULT_PRICE_WORKER_URL = '';
+const DEFAULT_PRICE_WORKER_URL = 'https://dividend-quotes.casio82.workers.dev';
 const PRICE_BATCH_TIMEOUT_MS = 14000;
 const PUBLIC_PRICE_GLOBAL_BUDGET_MS = 13000;
 const core = window.DividendCore;
